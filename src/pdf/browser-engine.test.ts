@@ -38,11 +38,16 @@ class ParserWorker extends EventTarget {
   }
 }
 
-function syntheticDocument(width = 612, height = 792) {
+function syntheticDocument(width = 612, height = 792, originalRotation = 0) {
   const page = {
-    getViewport: vi.fn(({ scale }: { scale: number }) => ({ width: width * scale, height: height * scale, rotation: 0 })),
+    rotate: originalRotation,
+    getViewport: vi.fn(({ scale, rotation = originalRotation }: { scale: number; rotation?: number }) => ({
+      width: (rotation % 180 === 0 ? width : height) * scale,
+      height: (rotation % 180 === 0 ? height : width) * scale,
+      rotation,
+    })),
     cleanup: vi.fn(),
-    render: vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
+    render: vi.fn<(options: { canvas: HTMLCanvasElement; viewport: { width: number; height: number; rotation: number }; background: string }) => { promise: Promise<void>; cancel: ReturnType<typeof vi.fn> }>(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
   };
   const document = { numPages: 1, getPage: vi.fn(async () => page) };
   const task = { promise: Promise.resolve(document), destroy: vi.fn(async () => {}), onPassword: null };
@@ -300,6 +305,32 @@ describe("browser PDF adapter loading failures", () => {
 });
 
 describe("browser PDF adapter render cleanup", () => {
+  it.each([0, 90, 180, 270])("combines the source rotation %i with editing deltas without reparsing or changing source data", async (originalRotation) => {
+    const fixture = syntheticDocument(420, 594, originalRotation);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const parser = engine();
+    const input = file();
+    const originalBytes = bytes.slice();
+    const handle = await parser.open(input, signal(), vi.fn());
+    const originalInfo = structuredClone(handle.pages);
+    const canvas = document.createElement("canvas");
+
+    for (const delta of [90, 180, 270, 360, -90]) {
+      await handle.render(1, canvas, signal(), delta);
+      const expectedRotation = ((originalRotation + delta) % 360 + 360) % 360;
+      const viewport = fixture.page.render.mock.calls.at(-1)![0].viewport;
+      expect(viewport).toMatchObject({ rotation: expectedRotation });
+      expect(viewport.width > viewport.height).toBe(expectedRotation % 180 !== 0);
+      expect(canvas.width * canvas.height).toBeLessThanOrEqual(320 * 440);
+      expect(fixture.page.rotate).toBe(originalRotation);
+      expect(handle.pages).toEqual(originalInfo);
+      expect(bytes).toEqual(originalBytes);
+    }
+    expect(adapter.getDocument).toHaveBeenCalledOnce();
+    expect(adapter.readPdfBytes).toHaveBeenCalledTimes(2);
+    expect(fixture.task.destroy).not.toHaveBeenCalled();
+  });
+
   it.each(["abort", "timeout", "destroy"])("cancels and releases an active render after %s", async (reason) => {
     vi.useFakeTimers();
     const fixture = syntheticDocument();

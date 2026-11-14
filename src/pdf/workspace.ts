@@ -1,6 +1,11 @@
 import { BrowserPdfEngine } from "./browser-engine";
 import { TaskQueue } from "./task-queue";
 import {
+  clearEditSelection, createEditState, deleteEditSelection, moveEditPage, redoEdit,
+  rotateEditSelection, selectAllEditPages, selectEditPage, undoEdit,
+  type PageSelectionModifiers, type PdfEditState,
+} from "./edit";
+import {
   abortError, isCancellation, pdfErrorMessage, MAX_PDF_FILES,
   MAX_PDF_FILE_BYTES, MAX_WORKSPACE_BYTES, MAX_RENDER_TASKS,
   type PdfDocumentHandle, type PdfEngine, type PdfFileEntry,
@@ -61,7 +66,7 @@ export class PdfWorkspace {
       if (bytes + file.size > MAX_WORKSPACE_BYTES) { rejections.add("工作区累计容量不能超过 256 MiB，请先移除部分文件。"); continue; }
       const entry: PdfFileEntry = {
         id: crypto.randomUUID(), name: file.name, size: file.size,
-        ordinal: ++this.ordinal, status: "queued", pages: [], selectedPage: 1, error: null,
+        ordinal: ++this.ordinal, status: "queued", pages: [], selectedPage: 1, edit: null, error: null,
       };
       const resource = { controller: new AbortController() };
       this.resources.set(entry.id, resource);
@@ -79,7 +84,7 @@ export class PdfWorkspace {
           return;
         }
         resource.document = document;
-        this.update(entry.id, { status: "ready", pages: document.pages });
+        this.update(entry.id, { status: "ready", pages: document.pages, edit: createEditState(entry.id, document.pages) });
       }, resource.controller.signal).catch((error: unknown) => {
         if (!isCancellation(error) && !resource.controller.signal.aborted) {
           this.update(entry.id, { status: "error", error: pdfErrorMessage(error), pages: [] });
@@ -92,18 +97,63 @@ export class PdfWorkspace {
     if (this.resources.has(id)) this.publish({ ...this.state, selectedId: id });
   }
 
-  selectPage(id: string, number: number) {
+  private edit(id: string, operation: (state: PdfEditState) => PdfEditState) {
     const entry = this.state.files.find((file) => file.id === id);
-    if (entry?.status === "ready" && Number.isInteger(number) && number >= 1 && number <= entry.pages.length) {
-      this.update(id, { selectedPage: number });
-    }
+    if (entry?.status !== "ready" || !entry.edit) return;
+    const edit = operation(entry.edit);
+    if (edit === entry.edit) return;
+    const selectedPage = edit.present.pages.findIndex((page) => edit.present.selectedIds.includes(page.id)) + 1;
+    this.update(id, { edit, selectedPage });
   }
 
-  async renderPage(id: string, number: number, canvas: HTMLCanvasElement, signal: AbortSignal) {
+  selectPage(id: string, number: number, modifiers: PageSelectionModifiers = {}) {
+    if (!Number.isInteger(number)) return;
+    this.edit(id, (edit) => {
+      const page = edit.present.pages[number - 1];
+      return page ? selectEditPage(edit, page.id, modifiers) : edit;
+    });
+  }
+
+  selectAllPages(id: string) { this.edit(id, selectAllEditPages); }
+  clearPageSelection(id: string) { this.edit(id, clearEditSelection); }
+
+  deleteSelectedPages(id: string) {
+    const entry = this.state.files.find((file) => file.id === id);
+    if (entry?.status !== "ready" || !entry.edit) return;
+    const { pages, selectedIds } = entry.edit.present;
+    if (pages.length && pages.every((page) => selectedIds.includes(page.id))) {
+      this.publish({ ...this.state, notice: "至少需要保留一页，不能删除当前文档的全部页面。" });
+      return;
+    }
+    this.edit(id, deleteEditSelection);
+  }
+
+  rotateSelectedPages(id: string, delta: 90 | -90) {
+    this.edit(id, (edit) => rotateEditSelection(edit, delta));
+  }
+
+  movePage(id: string, pageId: string, targetIndex: number) {
+    this.edit(id, (edit) => moveEditPage(edit, pageId, targetIndex));
+  }
+
+  moveSelectedPage(id: string, direction: -1 | 1) {
+    if (direction !== -1 && direction !== 1) return;
+    this.edit(id, (edit) => {
+      if (edit.present.selectedIds.length !== 1) return edit;
+      const pageId = edit.present.selectedIds[0];
+      const index = edit.present.pages.findIndex((page) => page.id === pageId);
+      return moveEditPage(edit, pageId, index + direction);
+    });
+  }
+
+  undo(id: string) { this.edit(id, undoEdit); }
+  redo(id: string) { this.edit(id, redoEdit); }
+
+  async renderPage(id: string, number: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta = 0) {
     const resource = this.resources.get(id);
     if (!resource?.document) throw abortError();
     const combined = AbortSignal.any([signal, resource.controller.signal]);
-    return this.renders.run(() => resource.document!.render(number, canvas, combined), combined);
+    return this.renders.run(() => resource.document!.render(number, canvas, combined, rotationDelta), combined);
   }
 
   removeFile(id: string) {

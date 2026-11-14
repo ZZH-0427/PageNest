@@ -1,3 +1,5 @@
+import type { PdfEditState } from "./edit";
+
 export const MAX_PDF_FILES = 20;
 export const MAX_PDF_FILE_BYTES = 100 * 1024 ** 2;
 export const MAX_WORKSPACE_BYTES = 256 * 1024 ** 2;
@@ -23,12 +25,13 @@ export interface PdfFileEntry {
   status: PdfStatus;
   pages: PdfPageInfo[];
   selectedPage: number;
+  edit: PdfEditState | null;
   error: string | null;
 }
 
 export interface PdfDocumentHandle {
   pages: PdfPageInfo[];
-  render(page: number, canvas: HTMLCanvasElement, signal: AbortSignal): Promise<void>;
+  render(page: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta?: number): Promise<void>;
   destroy(): Promise<void>;
 }
 

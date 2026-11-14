@@ -128,7 +128,7 @@ export function Settings() {
       <div className="about-line">
         <Info size={15} />
         <span>PageNest v0.2.0 · 本地优先的模块化文档工作站</span>
-        <span>Phase 2A / PDF 导入与预览</span>
+        <span>Phase 2B-1 / PDF 页面编辑与撤销重做</span>
       </div>
     </div>
   );

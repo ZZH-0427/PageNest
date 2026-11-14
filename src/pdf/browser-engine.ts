@@ -109,7 +109,7 @@ export class BrowserPdfEngine implements PdfEngine {
       let destruction: Promise<void> | undefined;
       return {
         pages,
-        render: async (number, canvas, renderSignal) => {
+        render: async (number, canvas, renderSignal, rotationDelta = 0) => {
           const time = deadline(AbortSignal.any([renderSignal, disposed.signal, this.lifetime.signal]), 20_000, "此页面渲染耗时过长，已停止预览。");
           let renderTask: RenderTask | undefined;
           let cancel: (() => void) | undefined;
@@ -118,9 +118,11 @@ export class BrowserPdfEngine implements PdfEngine {
             time.signal.throwIfAborted();
             page = await abortable(document.getPage(number), time.signal);
             time.signal.throwIfAborted();
-            const original = page.getViewport({ scale: 1 });
+            // PDF.js expects an absolute angle. Keep the source /Rotate intact.
+            const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
+            const original = page.getViewport({ scale: 1, rotation });
             const scale = Math.min(320 / original.width, 440 / original.height);
-            const viewport = page.getViewport({ scale });
+            const viewport = page.getViewport({ scale, rotation });
             canvas.width = Math.max(1, Math.floor(viewport.width));
             canvas.height = Math.max(1, Math.floor(viewport.height));
             renderTask = page.render({ canvas, viewport, background: "#ffffff" });

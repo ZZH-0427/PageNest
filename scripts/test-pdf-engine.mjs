@@ -38,9 +38,10 @@ async function withDocument(data, callback, options) {
   }
 }
 
-async function renderPage(page) {
-  const natural = page.getViewport({ scale: 1 });
-  const viewport = page.getViewport({ scale: 240 / Math.max(natural.width, natural.height) });
+async function renderPage(page, rotationDelta = 0) {
+  const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
+  const natural = page.getViewport({ scale: 1, rotation });
+  const viewport = page.getViewport({ scale: 240 / Math.max(natural.width, natural.height), rotation });
   const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
   try {
     await page.render({ canvas, viewport }).promise;
@@ -74,6 +75,47 @@ test("real multipage dimensions respect landscape media boxes and PDF rotation",
       assert.deepEqual([view.width, view.height, page.rotate], expected[index]);
       assert.deepEqual(await renderPage(page), [38, 102, 217, 255]);
     }
+  });
+});
+
+test("real PDF rendering composes all original rotations with edited angles without changing source pages", async () => {
+  const pages = [0, 90, 180, 270].map((rotate) => ({ width: 420, height: 594, rotate }));
+  const source = makePdf({ pages });
+  const original = source.slice();
+  // PDF.js owns this disposable byte copy; the imported file's bytes stay separate.
+  await withDocument(source.slice(), async (document) => {
+    for (let index = 0; index < pages.length; index++) {
+      const page = await document.getPage(index + 1);
+      for (const delta of [90, 180, 270, 360, -90]) {
+        const rotation = ((page.rotate + delta) % 360 + 360) % 360;
+        const view = page.getViewport({ scale: 1, rotation });
+        assert.deepEqual([view.width, view.height], rotation % 180 === 0 ? [420, 594] : [594, 420]);
+        assert.deepEqual(await renderPage(page, delta), [38, 102, 217, 255]);
+        assert.equal(page.rotate, pages[index].rotate);
+        const content = await page.getTextContent();
+        assert.ok(content.items.some((item) => item.str === `PAGE ${index + 1}`));
+      }
+    }
+  });
+  assert.deepEqual(source, original);
+});
+
+test("a real 24-page source remains addressable after editing the preview order", async () => {
+  await withDocument(makePdf({ pages: Array.from({ length: 24 }, (_, index) => mixedPages[index % 3]) }), async (document) => {
+    // The view deletes original page 2, moves page 24 first, and rotates page 3.
+    const view = [{ source: 24, delta: 0 }, { source: 3, delta: 90 }, { source: 1, delta: 0 }];
+    for (const entry of view) {
+      const page = await document.getPage(entry.source);
+      assert.equal(page.pageNumber, entry.source);
+      const text = await page.getTextContent();
+      assert.ok(text.items.some((item) => item.str === `PAGE ${entry.source}`));
+      assert.deepEqual(await renderPage(page, entry.delta), [38, 102, 217, 255]);
+    }
+    assert.equal(document.numPages, 24);
+    // Deletion from the view has not destroyed the original page needed by Undo.
+    const restored = await document.getPage(2);
+    assert.equal(restored.pageNumber, 2);
+    assert.deepEqual(await renderPage(restored), [38, 102, 217, 255]);
   });
 });
 

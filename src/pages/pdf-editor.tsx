@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
 import {
   AlertCircle,
-  ArrowDownUp,
+  ArrowLeft,
+  ArrowRight,
   Check,
   FilePlus2,
   FileText,
@@ -10,16 +11,21 @@ import {
   LoaderCircle,
   LockKeyhole,
   Plus,
+  Download,
+  Redo2,
+  RotateCcw,
   RotateCw,
   Scissors,
   ShieldCheck,
   Trash2,
   Upload,
+  Undo2,
   X,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { PdfThumbnail } from "../components/pdf/thumbnail";
 import { usePdfWorkspace } from "../pdf/use-pdf-workspace";
+import { getEditedPageInfo, isEdited } from "../pdf/edit";
 import {
   formatPdfBytes,
   MAX_PDF_FILES,
@@ -40,9 +46,7 @@ const statusLabels = {
 const futureActions = [
   { name: "拆分", icon: Scissors },
   { name: "合并", icon: Files },
-  { name: "删除页面", icon: Trash2 },
-  { name: "排序", icon: ArrowDownUp },
-  { name: "旋转", icon: RotateCw },
+  { name: "导出 PDF", icon: Download },
 ];
 
 const numberFormat = new Intl.NumberFormat("zh-CN", {
@@ -55,10 +59,21 @@ export function PdfEditor() {
   const scrollRoot = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
+  const pageDrag = useRef<{ documentId: string; pageId: string } | null>(null);
+  const [dragPageId, setDragPageId] = useState<string | null>(null);
+  const [dropMarker, setDropMarker] = useState<{ pageId: string; after: boolean } | null>(null);
   const selected = state.files.find((file) => file.id === state.selectedId);
-  const selectedPage = selected?.pages.find(
-    (page) => page.number === selected.selectedPage,
-  );
+  const edit = selected?.status === "ready" ? selected.edit : null;
+  const pages = edit?.present.pages ?? [];
+  const selectedIds = edit?.present.selectedIds ?? [];
+  const selectedCount = selectedIds.length;
+  const singlePageIndex = selectedCount === 1 ? pages.findIndex((page) => page.id === selectedIds[0]) : -1;
+  const singleEditPage = pages[singlePageIndex];
+  const selectedPage = singleEditPage && selected
+    ? getEditedPageInfo(singleEditPage, selected.pages[singleEditPage.sourcePageNumber - 1], singlePageIndex + 1)
+    : undefined;
+  const hasChanges = state.files.some((file) => file.status === "ready" && file.edit && isEdited(file.edit, file.pages));
+  const selectedChanged = Boolean(edit && selected && isEdited(edit, selected.pages));
   const readyCount = state.files.filter((file) => file.status === "ready").length;
   const pendingCount = state.files.filter(
     (file) => file.status !== "ready" && file.status !== "error",
@@ -69,6 +84,57 @@ export function PdfEditor() {
     if (scrollRoot.current) scrollRoot.current.scrollTop = 0;
   }, [state.selectedId]);
 
+  useEffect(() => {
+    if (!hasChanges) return;
+    const warnBeforeClosing = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeClosing);
+    return () => window.removeEventListener("beforeunload", warnBeforeClosing);
+  }, [hasChanges]);
+
+  const cancelPageDrag = () => {
+    pageDrag.current = null;
+    setDragPageId(null);
+    setDropMarker(null);
+  };
+
+  const handleEditingKeys = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!selected || selected.status !== "ready" || event.altKey || event.defaultPrevented || event.nativeEvent.isComposing) return;
+    const target = event.target as HTMLElement;
+    if (target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])') || !target.closest("[data-pdf-edit-context]")) return;
+    const modifier = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    if (modifier && key === "z") {
+      event.preventDefault();
+      if (event.shiftKey) workspace.redo(selected.id);
+      else workspace.undo(selected.id);
+    } else if (modifier && key === "y" && !event.shiftKey) {
+      event.preventDefault();
+      workspace.redo(selected.id);
+    } else if (target.closest(".pdf-pages-scroll")) {
+      if (modifier && key === "a") {
+        event.preventDefault();
+        workspace.selectAllPages(selected.id);
+      } else if (!modifier && key === "escape") {
+        event.preventDefault();
+        cancelPageDrag();
+        workspace.clearPageSelection(selected.id);
+      } else if (!modifier && key === "delete") {
+        event.preventDefault();
+        // The focused tile may be removed. Keep subsequent Undo inside the editor.
+        scrollRoot.current?.focus();
+        workspace.deleteSelectedPages(selected.id);
+      }
+    }
+  };
+
+  const pageDropPosition = (event: DragEvent<HTMLButtonElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return event.clientX >= bounds.left + bounds.width / 2;
+  };
+
   const openFilePicker = () => input.current?.click();
 
   return (
@@ -78,9 +144,9 @@ export function PdfEditor() {
           <div className="eyebrow">YOUR DOCUMENT WORKSPACE / PDF EDITOR</div>
           <div className="pdf-editor-title">
             <h1>PDF 页面管理</h1>
-            <span className="pdf-preview-badge">本地预览</span>
+            <span className="pdf-preview-badge">本地编辑</span>
           </div>
-          <p>把每一页，看得清楚。导入 PDF，在这里浏览与选择。</p>
+          <p>把每一页，安排妥当。选择、排序与旋转，原始文件保持不变。</p>
         </div>
         <div className="pdf-header-actions">
           <Button
@@ -129,21 +195,26 @@ export function PdfEditor() {
 
       <div
         className={`pdf-workbench ${dragging ? "is-dragging" : ""}`}
+        onKeyDown={handleEditingKeys}
         onDragEnter={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
           event.preventDefault();
           dragDepth.current += 1;
           setDragging(true);
         }}
         onDragOver={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
         onDragLeave={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
           event.preventDefault();
           dragDepth.current = Math.max(0, dragDepth.current - 1);
           if (dragDepth.current === 0) setDragging(false);
         }}
         onDrop={(event) => {
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
           event.preventDefault();
           dragDepth.current = 0;
           setDragging(false);
@@ -197,7 +268,7 @@ export function PdfEditor() {
                         <strong title={file.name}>{file.name}</strong>
                         <span className="pdf-file-meta">
                           {formatPdfBytes(file.size)}
-                          {file.status === "ready" && <> · {file.pages.length} 页</>}
+                          {file.status === "ready" && <> · {file.edit?.present.pages.length ?? file.pages.length} 页</>}
                         </span>
                         <span className={`pdf-file-state state-${file.status}`}>
                           {file.status === "ready" ? <Check size={11} /> : file.status === "error" ? <AlertCircle size={11} /> : <LoaderCircle size={11} className="pdf-spinner" />}
@@ -227,15 +298,25 @@ export function PdfEditor() {
           </div>
         </section>
 
-        <section className="pdf-preview-panel" aria-label="PDF 页面预览">
+        <section className="pdf-preview-panel" aria-label="PDF 页面预览" data-pdf-edit-context>
           <div className="pdf-panel-heading pdf-preview-heading">
             <div>
               <LayoutGrid size={15} />
-              <h2>{selected ? "页面预览" : "预览工作区"}</h2>
-              {selected?.status === "ready" && <span className="pdf-page-total">{selected.pages.length} 页</span>}
+              <h2>{selected ? "页面编辑" : "预览工作区"}</h2>
+              {selected?.status === "ready" && <span className="pdf-page-total">{pages.length} 页 · 已选 {selectedCount} 页</span>}
             </div>
-            <span className="pdf-preview-hint">{selected?.status === "ready" ? "点击页面查看信息" : "本地浏览器处理"}</span>
+            <span className="pdf-preview-hint">本地浏览器处理</span>
           </div>
+          {selected?.status === "ready" && (
+            <div className="pdf-edit-toolbar" role="toolbar" aria-label="页面编辑工具栏">
+              <Button variant="ghost" size="icon" aria-label="撤销" title="撤销 (Ctrl / ⌘ Z)" disabled={!edit?.past.length} onClick={() => workspace.undo(selected.id)}><Undo2 size={16} /></Button>
+              <Button variant="ghost" size="icon" aria-label="重做" title="重做 (Ctrl Y / ⌘ ⇧ Z)" disabled={!edit?.future.length} onClick={() => workspace.redo(selected.id)}><Redo2 size={16} /></Button>
+              <span className="pdf-toolbar-divider" />
+              <Button variant="ghost" size="icon" aria-label="顺时针旋转 90°" title="顺时针旋转 90°" disabled={!selectedCount} onClick={() => workspace.rotateSelectedPages(selected.id, 90)}><RotateCw size={16} /></Button>
+              <Button variant="ghost" size="icon" aria-label="删除选中页面" title="删除选中页面 (Delete)" disabled={!selectedCount} onClick={() => workspace.deleteSelectedPages(selected.id)}><Trash2 size={16} /></Button>
+              <span className="pdf-selection-hint" id="pdf-selection-help">Ctrl / ⌘ 多选 · Shift 连选</span>
+            </div>
+          )}
           <div ref={scrollRoot} className="pdf-pages-scroll" tabIndex={0} aria-label="页面缩略图滚动区域">
             {!selected ? (
               <div className="pdf-workspace-empty">
@@ -251,15 +332,57 @@ export function PdfEditor() {
               </div>
             ) : selected.status === "ready" ? (
               <div className="pdf-thumbnail-grid" key={selected.id}>
-                {selected.pages.map((page) => (
+                {pages.map((editPage, index) => (
                   <PdfThumbnail
-                    key={`${selected.id}-${page.number}`}
+                    key={editPage.id}
                     workspace={workspace}
                     documentId={selected.id}
-                    page={page}
-                    selected={selected.selectedPage === page.number}
-                    onSelect={() => workspace.selectPage(selected.id, page.number)}
+                    page={getEditedPageInfo(editPage, selected.pages[editPage.sourcePageNumber - 1], index + 1)}
+                    sourcePageNumber={editPage.sourcePageNumber}
+                    rotationDelta={editPage.rotationDelta}
+                    selected={selectedIds.includes(editPage.id)}
+                    onSelect={(event) => workspace.selectPage(selected.id, index + 1, {
+                      toggle: event.ctrlKey || event.metaKey, range: event.shiftKey,
+                    })}
                     scrollRoot={scrollRoot}
+                    tileProps={{
+                      draggable: selectedCount <= 1,
+                      "aria-describedby": "pdf-selection-help",
+                      className: `${dragPageId === editPage.id ? "is-page-dragging" : ""} ${dropMarker?.pageId === editPage.id ? dropMarker.after ? "drop-after" : "drop-before" : ""}`,
+                      onDragStart: (event) => {
+                        if (selectedCount > 1) { event.preventDefault(); return; }
+                        pageDrag.current = { documentId: selected.id, pageId: editPage.id };
+                        setDragPageId(editPage.id);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("application/x-pagenest-page", editPage.id);
+                        workspace.selectPage(selected.id, index + 1);
+                      },
+                      onDragOver: (event) => {
+                        if (pageDrag.current?.documentId !== selected.id || selectedCount > 1) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        event.dataTransfer.dropEffect = "move";
+                        setDropMarker({ pageId: editPage.id, after: pageDropPosition(event) });
+                      },
+                      onDragLeave: (event) => {
+                        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDropMarker(null);
+                      },
+                      onDrop: (event) => {
+                        const drag = pageDrag.current;
+                        if (!drag || drag.documentId !== selected.id) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const from = pages.findIndex((page) => page.id === drag.pageId);
+                        if (from < 0 || selectedCount !== 1 || selectedIds[0] !== drag.pageId) {
+                          cancelPageDrag();
+                          return;
+                        }
+                        const insertion = index + (pageDropPosition(event) ? 1 : 0);
+                        workspace.movePage(selected.id, drag.pageId, insertion > from ? insertion - 1 : insertion);
+                        cancelPageDrag();
+                      },
+                      onDragEnd: cancelPageDrag,
+                    }}
                   />
                 ))}
               </div>
@@ -282,11 +405,11 @@ export function PdfEditor() {
           </div>
           <div className="pdf-preview-footer" aria-live="polite">
             <span>{readyCount} 份文档已就绪{pendingCount > 0 ? ` · ${pendingCount} 份正在导入` : ""}</span>
-            <span>{selected?.status === "ready" ? `已选择第 ${selected.selectedPage} 页` : "按需加载页面预览"}</span>
+            <span>{selected?.status === "ready" ? selectedCount === 1 ? `已选择第 ${singlePageIndex + 1} 页` : `已选择 ${selectedCount} 页` : "按需加载页面预览"}</span>
           </div>
         </section>
 
-        <aside className="pdf-info-panel" aria-label="文档与页面信息">
+        <aside className="pdf-info-panel" aria-label="文档与页面信息" data-pdf-edit-context>
           <div className="pdf-panel-heading"><h2>检查器</h2><FileText size={16} /></div>
           <div className="pdf-info-scroll">
             <section className="pdf-info-section">
@@ -297,7 +420,8 @@ export function PdfEditor() {
                   <dl>
                     <div><dt>文档编号</dt><dd>#{String(selected.ordinal).padStart(2, "0")}</dd></div>
                     <div><dt>文件大小</dt><dd>{formatPdfBytes(selected.size)}</dd></div>
-                    <div><dt>总页数</dt><dd>{selected.status === "ready" ? `${selected.pages.length} 页` : "—"}</dd></div>
+                    <div><dt>当前页数</dt><dd>{selected.status === "ready" ? `${pages.length} 页` : "—"}</dd></div>
+                    {selectedChanged && <div><dt>原始页数</dt><dd>{selected.pages.length} 页</dd></div>}
                     <div><dt>解析状态</dt><dd className={`state-${selected.status}`}>{statusLabels[selected.status]}</dd></div>
                   </dl>
                 </>
@@ -305,7 +429,7 @@ export function PdfEditor() {
             </section>
 
             <section className="pdf-info-section">
-              <h3>页面信息</h3>
+              <h3>{selectedCount > 1 ? "多页选择" : "页面信息"}</h3>
               {selectedPage ? (
                 <>
                   <div className="pdf-selected-page-number">{String(selectedPage.number).padStart(2, "0")}<span>当前页面</span></div>
@@ -313,26 +437,40 @@ export function PdfEditor() {
                     <div><dt>页面宽度</dt><dd>{numberFormat.format(selectedPage.width)} pt</dd></div>
                     <div><dt>页面高度</dt><dd>{numberFormat.format(selectedPage.height)} pt</dd></div>
                     <div><dt>页面方向</dt><dd>{{ portrait: "纵向", landscape: "横向", square: "方形" }[selectedPage.orientation]}</dd></div>
+                    <div><dt>来源页码</dt><dd>原第 {singleEditPage.sourcePageNumber} 页</dd></div>
+                    <div><dt>显示旋转</dt><dd>{selectedPage.rotation}°</dd></div>
                   </dl>
                   <p className="pdf-dimension-note">约 {numberFormat.format(selectedPage.width * 25.4 / 72)} × {numberFormat.format(selectedPage.height * 25.4 / 72)} mm</p>
                 </>
-              ) : <p className="pdf-info-placeholder">选择页面，查看尺寸与方向。</p>}
+              ) : selectedCount > 1 ? <p className="pdf-multi-selection">已选中 <strong>{selectedCount}</strong> 页，可批量删除或旋转。</p> : <p className="pdf-info-placeholder">选择页面，查看尺寸与方向。</p>}
+              {selected?.status === "ready" && (
+                <div className="pdf-edit-actions" role="group" aria-label="选中页面操作">
+                  <Button variant="outline" size="sm" disabled={!selectedCount} aria-label="逆时针旋转 90°" onClick={() => workspace.rotateSelectedPages(selected.id, -90)}><RotateCcw size={14} />左转 90°</Button>
+                  <Button variant="outline" size="sm" disabled={!selectedCount} aria-label="批量顺时针旋转 90°" onClick={() => workspace.rotateSelectedPages(selected.id, 90)}><RotateCw size={14} />右转 90°</Button>
+                  <Button variant="outline" size="sm" disabled={singlePageIndex <= 0} aria-label="向前移动一页" onClick={() => workspace.moveSelectedPage(selected.id, -1)}><ArrowLeft size={14} />向前移</Button>
+                  <Button variant="outline" size="sm" disabled={singlePageIndex < 0 || singlePageIndex === pages.length - 1} aria-label="向后移动一页" onClick={() => workspace.moveSelectedPage(selected.id, 1)}><ArrowRight size={14} />向后移</Button>
+                  <Button variant="outline" size="sm" className="pdf-delete-action" disabled={!selectedCount} aria-label="批量删除选中页面" onClick={() => workspace.deleteSelectedPages(selected.id)}><Trash2 size={14} />删除所选</Button>
+                  <p>仅支持单页拖拽排序。多选时请先单击一页；也可使用向前移、向后移。</p>
+                </div>
+              )}
             </section>
 
             <section className="pdf-info-section pdf-future-section" aria-label="后续编辑功能">
-              <h3>页面编辑 <LockKeyhole size={12} /></h3>
+              <h3>后续功能 <LockKeyhole size={12} /></h3>
               <div className="pdf-future-actions">
                 {futureActions.map((action) => (
-                  <Button key={action.name} variant="outline" size="sm" disabled title="尚未实现" aria-describedby="pdf-editing-unavailable">
+                  <Button key={action.name} variant="outline" size="sm" disabled title="后续阶段开放" aria-describedby="pdf-editing-unavailable">
                     <action.icon size={14} />{action.name}
                   </Button>
                 ))}
               </div>
-              <p id="pdf-editing-unavailable">编辑功能尚未实现。当前仅支持导入、浏览和页面选择，不会修改或导出文件。</p>
+              <p id="pdf-editing-unavailable">拆分、合并和导出将在后续阶段开放。当前不会生成新的 PDF 文件。</p>
             </section>
           </div>
         </aside>
       </div>
+
+      {hasChanges && <p className="pdf-unsaved-note" role="status">当前修改仅保存在浏览器工作区，尚未生成新的 PDF 文件。离开此页、移除文档或清空工作区后，修改将丢失。</p>}
 
       <footer className="pdf-local-note">
         <ShieldCheck size={14} />

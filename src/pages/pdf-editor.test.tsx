@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PdfFileEntry, PdfPageInfo } from "../pdf/types";
+import { createEditState } from "../pdf/edit";
 import { PdfEditor } from "./pdf-editor";
 
 const model = vi.hoisted(() => ({
@@ -17,6 +18,9 @@ const model = vi.hoisted(() => ({
     removeFile: vi.fn(),
     clear: vi.fn(),
     dismissNotice: vi.fn(),
+    selectAllPages: vi.fn(), clearPageSelection: vi.fn(),
+    deleteSelectedPages: vi.fn(), rotateSelectedPages: vi.fn(),
+    movePage: vi.fn(), moveSelectedPage: vi.fn(), undo: vi.fn(), redo: vi.fn(),
   },
 }));
 
@@ -28,7 +32,7 @@ vi.mock("../components/pdf/thumbnail", () => ({
   PdfThumbnail: ({ page, selected, onSelect }: {
     page: PdfPageInfo;
     selected: boolean;
-    onSelect: () => void;
+    onSelect: React.MouseEventHandler<HTMLButtonElement>;
   }) => (
     <button type="button" onClick={onSelect} aria-pressed={selected}>
       第 {page.number} 页
@@ -46,7 +50,7 @@ const landscape: PdfPageInfo = {
 function documentEntry(id: string, ordinal: number, pages = [portrait]): PdfFileEntry {
   return {
     id, ordinal, name: "synthetic.pdf", size: 2048,
-    status: "ready", pages, selectedPage: 1, error: null,
+    status: "ready", pages, selectedPage: 1, edit: createEditState(id, pages), error: null,
   };
 }
 
@@ -124,8 +128,9 @@ describe("PDF workspace user interface", () => {
     model.state = { files: [file], selectedId: "first", notice: null };
     const view = render(<PdfEditor />);
     await user.click(screen.getByRole("button", { name: "第 2 页" }));
-    expect(model.workspace.selectPage).toHaveBeenCalledWith("first", 2);
-    model.state = { ...model.state, files: [{ ...file, selectedPage: 2 }] };
+    expect(model.workspace.selectPage).toHaveBeenCalledWith("first", 2, { toggle: false, range: false });
+    const edit = file.edit!;
+    model.state = { ...model.state, files: [{ ...file, selectedPage: 2, edit: { ...edit, present: { ...edit.present, selectedIds: [edit.present.pages[1].id] } } }] };
     view.rerender(<PdfEditor />);
     expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute("aria-pressed", "true");
     const info = within(screen.getByRole("complementary", { name: "文档与页面信息" }));
@@ -170,14 +175,14 @@ describe("PDF workspace user interface", () => {
     expect(model.workspace.removeFile).toHaveBeenCalledWith("pending");
   });
 
-  it("keeps all future editing operations disabled and exposes keyboard-operable file selection", async () => {
+  it("keeps export and document assembly disabled and exposes keyboard-operable file selection", async () => {
     const user = userEvent.setup();
     model.state = { files: [documentEntry("one", 1)], selectedId: "one", notice: null };
     render(<PdfEditor />);
-    for (const name of ["拆分", "合并", "删除页面", "排序", "旋转"]) {
+    for (const name of ["拆分", "合并", "导出 PDF"]) {
       expect(screen.getByRole("button", { name })).toBeDisabled();
     }
-    expect(screen.getByText(/编辑功能尚未实现/)).toBeInTheDocument();
+    expect(screen.getByText(/拆分、合并和导出将在后续阶段开放/)).toBeInTheDocument();
     const fileButton = screen.getByRole("button", { name: "查看 synthetic.pdf（文件 1）" });
     fileButton.focus();
     expect(fileButton).toHaveFocus();
