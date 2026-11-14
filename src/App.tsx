@@ -6,6 +6,7 @@ import { Tasks } from "./pages/tasks";
 import { Settings } from "./pages/settings";
 import { tools } from "./config/tools";
 import { Button } from "./components/ui/button";
+import { PdfEditor } from "./pages/pdf-editor";
 
 export function App() {
   return (
@@ -16,7 +17,7 @@ export function App() {
           <Route
             key={tool.id}
             path={tool.id}
-            element={<ToolPage tool={tool} />}
+            element={tool.id === "pdf-editor" ? <PdfEditor /> : <ToolPage tool={tool} />}
           />
         ))}
         <Route path="tasks" element={<Tasks />} />

@@ -53,9 +53,9 @@ export const tools = [
     english: "PDF Editor",
     icon: Files,
     color: "purple",
-    description: "拆分、合并、重排，让每一页井然有序。",
+    description: "导入 PDF，浏览真实页面与文档信息。",
     detail:
-      "计划在浏览器中以可视化缩略图管理 PDF 页面，支持拖拽排序与多页选择。",
+      "在浏览器本地解析 PDF，按需预览缩略图、页面尺寸与方向。",
     formats: [
       "合并 PDF",
       "拆分 PDF",
@@ -64,7 +64,7 @@ export const tools = [
       "旋转页面",
       "选择页面导出",
     ],
-    future: "页面缩略图与 PDF 处理将在后续版本提供。",
+    future: "已支持本地导入与预览；合并、拆分、删除、排序、旋转和导出尚未开放。",
   },
   {
     id: "ocr",

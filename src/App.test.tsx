@@ -62,6 +62,8 @@ describe("PageNest workstation", () => {
         name: "PDF 页面管理",
       }),
     );
+    expect(screen.queryByText("example.pdf")).not.toBeInTheDocument();
+    await user.click(within(screen.getByRole("navigation")).getByRole("link", { name: "工作台" }));
     expect(screen.getByText("example.pdf")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "移除 example.pdf" }));
     expect(screen.queryByText("example.pdf")).not.toBeInTheDocument();

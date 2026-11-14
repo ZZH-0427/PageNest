@@ -2,19 +2,27 @@
 
 本地优先、模块化的智能文档处理工作站。PageNest 面向桌面浏览器，将文档工具组织在统一、简洁的工作区中。
 
-**当前版本：v0.1.0 · Phase 1**
+**当前版本：v0.2.0 · Phase 2A**
 
 ## 当前可以做什么
 
 - 访问工作台、格式转换、文件压缩、PDF 页面管理、OCR、任务记录和设置。
-- 通过选择或拖放文件查看名称、类型和大小等基础信息。
-  单个文件最多 100 MiB（104,857,600 字节），最多保留 20 个文件。文件大小按 1024 进制计算；当前界面沿用 KB、MB 等标签，其中 MB 对应 MiB（1024² 字节），KB 对应 KiB（1024 字节）。
+- 工作台及通用工具页面支持选择或拖放文件，查看名称、类型和大小等基础信息，不读取文档内容。
+- 在 PDF 页面管理中独立导入一个或多个真实 PDF，解析实际页数，浏览按需渲染的页面缩略图，并查看页面尺寸与方向。
+- 切换 PDF、选择页面、移除文件或清空 PDF 工作区。同名文件分别保留，批量导入中单个文件失败不会阻止其他文件。
 - 切换浅色、深色、跟随系统主题，并在本机保存主题偏好。
-- 了解各模块的后续能力与处理方式。
 
-本阶段仅完成工程基础和 UI。文档转换、压缩、PDF 编辑、OCR 和任务处理引擎尚未实现；相关操作会明确展示待开发状态，不会生成处理结果或模拟进度。全局文档搜索也尚未开放。
+单个文件最多 100 MiB（104,857,600 字节），最多保留 20 个文件。PDF 工作区另有累计 256 MiB、每份 PDF 最多 1,000 页的限制，以控制浏览器内存占用。容量按 1024 进制计算；通用文件列表沿用 KB、MB 标签，其中 MB 对应 MiB（1024² 字节），KB 对应 KiB（1024 字节）。
 
-文件保留在当前浏览器会话中，应用不会将文件上传至服务器，也不会保存文件内容或文件列表。刷新或关闭页面会清除本次选择；只有主题偏好保存在浏览器本地存储中。页面本身和静态资源仍由网站托管方提供。
+Phase 2A 仅提供 PDF 导入、解析与可视化预览。合并、拆分、删除页面、排序、旋转和导出仍未实现，编辑入口保持禁用；移除文件只会将整份 PDF 移出当前工作区。文档转换、压缩、OCR、任务处理和全局搜索也尚未开放，不会生成虚假的处理结果。
+
+PDF 原始数据只在当前 PDF 工作区的浏览器内存中用于解析与渲染，离开 PDF 页面、刷新或关闭页面时清除。工作台和其他通用工具继续只保存文件元数据，其列表在刷新或关闭页面后清除，不会自动传递为已解析 PDF。应用不上传文档，不将文件内容或文件列表写入 localStorage 或 IndexedDB；只有主题偏好保存在本地。页面、Worker、字体等静态资源仍由网站托管方提供。
+
+## PDF 工作区
+
+从左侧导航打开 PDF 页面管理，点击添加 PDF 或拖入文件。左栏管理文件，中间浏览真实缩略图，右栏显示所选文档及页面信息。缩略图通过页面可见性检测按需加载，限制渲染并发与 Canvas 像素尺寸，避免一次渲染全部页面。文件切换会取消不再需要的缩略图任务；移除文件、清空工作区及离开页面会释放对应解析任务、文档资源与 Canvas。
+
+导入会检查文件特征，并由 PDF.js 真实解析。空文件、伪装 PDF、损坏文件、超限文件及解析或渲染失败都会显示明确提示。需要密码的 PDF 暂不支持；对于超出当前浏览器处理能力的文档，应使用更小的文件。复杂文档的字体、色彩和特殊 PDF 特性可能受浏览器及 PDF.js 支持程度影响。
 
 ## 功能规划
 
@@ -32,9 +40,13 @@
 
 React、TypeScript、Vite、Tailwind CSS、shadcn/ui 风格基础组件、Lucide Icons、React Router、Vitest 和 React Testing Library。项目使用 Hash Router 以适配静态站点；当前不需要 Python 服务。
 
+PDF 解析和渲染使用固定版本的 Mozilla [`pdfjs-dist` 6.5.438](https://github.com/mozilla/pdf.js/releases/tag/v6.5.438)（Apache-2.0），主模块和解析 Worker 均使用同一依赖中的 `legacy` 兼容构建。`legacy` 表示转译及兼容支持，不是旧版 PDF.js；支持范围以 [PDF.js 官方说明](https://github.com/mozilla/pdf.js/wiki/Frequently-Asked-Questions)为准。
+
+Worker 通过 Vite `?url` 资产导入生成本地构建地址。CMaps、标准字体、WASM 和 ICC 资源从同版本依赖提供，保留相应许可证，开发服务器与生产构建使用同源版本目录。不依赖 CDN，也不关闭解析 Worker 来绕过加载问题。文档二进制数据直接交给 Worker，不通过网络 URL 加载用户文档。
+
 ## 本地安装与运行
 
-最低要求 Node.js 22.12.0（与 `package.json` 的 `engines` 一致）；推荐使用 Node.js 24 和 npm 11，与本地验收和 CI 环境保持一致。
+最低要求 Node.js 22.13.0（与 PDF.js 及 `package.json` 的 `engines` 一致）；推荐使用 Node.js 24 和 npm 11，与本地验收和 CI 环境保持一致。
 
 ```sh
 npm ci
@@ -51,6 +63,7 @@ npm run check
 npm run typecheck
 npm run lint
 npm test
+npm run test:pdf-engine
 npm run build
 npm run audit:files
 
@@ -61,13 +74,15 @@ npm run preview
 npm audit --omit=dev --audit-level=moderate
 ```
 
-`npm test` 以非交互方式依次运行前端测试和隔离 Git 仓库安全回归测试；也可使用 `npm run test:security` 单独运行后者。`dist/` 是本地生成目录，不应提交。
+`npm test` 以非交互方式运行前端测试、真实 PDF 引擎测试和隔离 Git 仓库安全回归测试。`npm run test:pdf-engine` 使用人工生成、无私人内容的 PDF 验证 PDF.js 的真实解析和页面渲染，不只检查模拟页数；`npm run test:security` 可单独运行安全回归测试。`dist/` 是本地生成目录，不应提交。
+
+浏览器验收应分别运行开发服务器和 `npm run build` 后的 `npm run preview`，访问 `/PageNest/#/pdf-editor`，核对真实 PDF 导入、多文件切换、横纵页面、懒加载、移除、异常提示及主题。生产预览还应检查 Worker、JS、CSS 和 PDF.js 辅助资源均从 `/PageNest/` 下加载，深链接刷新正常且没有文档上传请求。
 
 为修复构建工具链的已知 glob 复杂度漏洞，项目暂时将 `@typescript-eslint/typescript-estree` 的 `minimatch` 局部锁定为 `11.0.7`；上游发布包含修复的版本后可移除此 override，再执行完整检查与依赖审计。
 
 ## 代码组织
 
-页面、共享 UI、导航布局、主题状态、文件状态、功能配置、类型和本地引擎接口分别组织在 `src/` 的独立模块中。新增工具应添加页面与功能配置，并接入既有路由和布局；避免在单个组件中堆叠整个工作站。引擎接口仅定义连接边界，不会在本阶段主动连接本地服务。
+页面、共享 UI、导航布局、主题状态、文件状态、功能配置、类型和本地引擎接口分别组织在 `src/` 的独立模块中。PDF 工作区独立管理二进制数据、解析任务和渲染资源，不扩展原有全局元数据状态的职责。新增工具应添加页面与功能配置，并接入既有路由和布局；避免在单个组件中堆叠整个工作站。本地引擎接口仅定义连接边界，不会在本阶段主动连接本地服务。
 
 ## 隐私与仓库审查
 
@@ -93,13 +108,14 @@ npm run audit:files
 
 ## GitHub Pages 部署
 
-目标站点：[PageNest](https://ZZH-0427.github.io/PageNest/)。配置说明不表示站点已经发布。
+正式站点：[PageNest](https://ZZH-0427.github.io/PageNest/)。本地版本的更新不代表已经发布到正式站点。
 
 - `vite.config.ts` 使用 `base: '/PageNest/'`；Hash Router 形成 `/PageNest/#/...` 路由，刷新工具页面时无需服务端回退配置。
+- PDF.js Worker 和辅助资源随生产构建提供，路径包含该子目录，无需第三方 CDN 或后端服务。
 - `checks.yml` 对目标为 `main` 的 Pull Request 执行类型检查、lint、测试、候选文件审查、生产依赖审计和构建。
 - `deploy.yml` 在代码进入 `main` 后复用同一套检查；全部通过才上传 `dist/` 并部署 Pages。构建产物由 Actions 生成，不提交到 Git。
 - 检查任务仅有 `contents: read`；仅部署任务具有 `pages: write` 和 `id-token: write`。
 
-首次上线需要仓库管理员在审核并批准之后，将 Settings → Pages → Source 设为 GitHub Actions。建议保护 `main`、要求 PR 审核和 Checks 成功；如需每次上线再确认，可为 `github-pages` 环境配置审核人。工作流本身不能替代分支保护和人工审核，项目初始化不会修改这些远程设置。
+Pages 发布来源应设为 Settings → Pages → Source → GitHub Actions。建议保护 `main`、要求 PR 审核和 Checks 成功；如需每次上线再确认，可为 `github-pages` 环境配置审核人。工作流本身不能替代分支保护和人工审核，调整这些远程设置需要另行授权。
 
-GitHub Pages 仅托管静态前端，无法运行 Python / FastAPI 服务。本阶段仅准备部署配置，不主动推送或触发发布。
+GitHub Pages 仅托管静态前端，无法运行 Python / FastAPI 服务。Phase 2A 只在本地开发与验证，源码和 UI 审核通过并取得明确授权之后，才能提交、推送或发布。

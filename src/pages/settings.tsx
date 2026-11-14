@@ -100,14 +100,19 @@ export function Settings() {
         </div>
         <ul className="privacy-list">
           <li>
-            文件选择仅在内存中保存名称、类型、大小等基本信息，不上传文档。
+            工作台及通用工具仅在内存中保存文件名称、类型、大小等基本信息，刷新或关闭页面即清空。
           </li>
-          <li>不保存文档内容和文件列表；刷新或关闭页面即清空。</li>
-          <li>无账户、无统计追踪；仅在本地保存主题偏好。</li>
+          <li>
+            PDF 页面管理在浏览器内存中读取、解析并预览文档；离开 PDF
+            页面、刷新或关闭页面即清空。
+          </li>
+          <li>
+            不上传文档，不持久保存文件内容或列表。无账户、无统计追踪；仅在本地保存主题偏好。
+          </li>
         </ul>
         <div className="settings-data-row">
           <div>
-            <strong>当前文件列表</strong>
+            <strong>通用文件信息列表</strong>
             <span>已选择 {files.length} 个文件 · 清空不会删除电脑中的文件</span>
           </div>
           <Button
@@ -122,8 +127,8 @@ export function Settings() {
       </section>
       <div className="about-line">
         <Info size={15} />
-        <span>PageNest v0.1.0 · 本地优先的模块化文档工作站</span>
-        <span>Phase 1 / 界面预览</span>
+        <span>PageNest v0.2.0 · 本地优先的模块化文档工作站</span>
+        <span>Phase 2A / PDF 导入与预览</span>
       </div>
     </div>
   );

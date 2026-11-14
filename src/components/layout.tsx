@@ -101,7 +101,7 @@ export function Layout() {
             >
               <item.icon size={18} strokeWidth={1.7} />
               <span>{item.name}</span>
-              {index > 0 && index < 5 && (
+              {index > 0 && index < 5 && item.id !== "pdf-editor" && (
                 <span className="nav-dot" aria-label="功能待开发" />
               )}
               {item.id === "" && <span className="nav-key">⌂</span>}
@@ -125,7 +125,7 @@ export function Layout() {
           </div>
           <div className="sidebar-footer">
             <span>
-              PageNest <small>v0.1.0</small>
+              PageNest <small>v0.2.0</small>
             </span>
             <span className="preview-label">预览版</span>
           </div>

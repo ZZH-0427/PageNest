@@ -1,10 +1,10 @@
 {
   "name": "pagenest",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.13.0"
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {
@@ -17,26 +17,28 @@
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
-    "test": "vitest run src && npm run test:security",
+    "test": "vitest run src && npm run test:security && npm run test:pdf-engine",
     "test:watch": "vitest src",
     "audit:files": "node scripts/audit-public-files.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run build && npm run audit:files",
-    "test:security": "node --test scripts/audit-public-files.test.mjs"
+    "test:security": "node --test scripts/audit-public-files.test.mjs",
+    "test:pdf-engine": "node --test scripts/test-pdf-engine.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
+    "pdfjs-dist": "6.5.438",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.13.0",
     "tailwind-merge": "^3.5.0"
   },
   "devDependencies": {
-    "@testing-library/dom": "^10.4.1",
     "@eslint/js": "^9.39.0",
     "@tailwindcss/vite": "^4.2.0",
+    "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@testing-library/user-event": "^14.6.1",
