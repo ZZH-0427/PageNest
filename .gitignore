@@ -1,0 +1,60 @@
+# Local agent guidance and work records: never publish.
+AGENTS.md
+AGENTS.*.md
+.codex/
+.agents/
+.openai/
+
+# Dependencies, generated assets, caches and reports.
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+.cache/
+*.tsbuildinfo
+test-results/
+playwright-report/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Private documents, generated outputs and local processing state.
+local-data/
+temp/
+tmp/
+outputs/
+logs/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# Credentials and machine-specific configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+.npmrc
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Editor and operating-system metadata.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.local
+*.bak
+*.tmp
+~$*
