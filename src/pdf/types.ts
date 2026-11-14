@@ -32,6 +32,9 @@ export interface PdfFileEntry {
 export interface PdfDocumentHandle {
   pages: PdfPageInfo[];
   render(page: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta?: number): Promise<void>;
+  inspectPage?(page: number, signal: AbortSignal, rotationDelta?: number): Promise<{
+    textDigest: string; visualDigest: string; width: number; height: number; rotation: number;
+  }>;
   destroy(): Promise<void>;
 }
 

@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { PdfThumbnail } from "../components/pdf/thumbnail";
+import { PdfExportPanel } from "../components/pdf/export-panel";
 import { usePdfWorkspace } from "../pdf/use-pdf-workspace";
 import { getEditedPageInfo, isEdited } from "../pdf/edit";
 import {
@@ -46,7 +47,6 @@ const statusLabels = {
 const futureActions = [
   { name: "拆分", icon: Scissors },
   { name: "合并", icon: Files },
-  { name: "导出 PDF", icon: Download },
 ];
 
 const numberFormat = new Intl.NumberFormat("zh-CN", {
@@ -59,6 +59,7 @@ export function PdfEditor() {
   const scrollRoot = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const pageDrag = useRef<{ documentId: string; pageId: string } | null>(null);
   const [dragPageId, setDragPageId] = useState<string | null>(null);
   const [dropMarker, setDropMarker] = useState<{ pageId: string; after: boolean } | null>(null);
@@ -149,6 +150,14 @@ export function PdfEditor() {
           <p>把每一页，安排妥当。选择、排序与旋转，原始文件保持不变。</p>
         </div>
         <div className="pdf-header-actions">
+          <Button
+            variant="outline"
+            disabled={selected?.status !== "ready" || pages.length === 0}
+            aria-expanded={exportOpen && selected?.status === "ready"}
+            onClick={() => setExportOpen(true)}
+          >
+            <Download size={15} />导出 PDF
+          </Button>
           <Button
             variant="outline"
             disabled={state.files.length === 0}
@@ -412,6 +421,9 @@ export function PdfEditor() {
         <aside className="pdf-info-panel" aria-label="文档与页面信息" data-pdf-edit-context>
           <div className="pdf-panel-heading"><h2>检查器</h2><FileText size={16} /></div>
           <div className="pdf-info-scroll">
+            {exportOpen && selected?.status === "ready" && (
+              <PdfExportPanel key={selected.id} file={selected} controller={workspace.exporter} onClose={() => setExportOpen(false)} />
+            )}
             <section className="pdf-info-section">
               <h3>文档信息</h3>
               {selected ? (
@@ -464,13 +476,13 @@ export function PdfEditor() {
                   </Button>
                 ))}
               </div>
-              <p id="pdf-editing-unavailable">拆分、合并和导出将在后续阶段开放。当前不会生成新的 PDF 文件。</p>
+              <p id="pdf-editing-unavailable">拆分与多文件合并将在后续阶段开放。当前可导出单个文档的全部保留页面。</p>
             </section>
           </div>
         </aside>
       </div>
 
-      {hasChanges && <p className="pdf-unsaved-note" role="status">当前修改仅保存在浏览器工作区，尚未生成新的 PDF 文件。离开此页、移除文档或清空工作区后，修改将丢失。</p>}
+      {hasChanges && <p className="pdf-unsaved-note" role="status">当前修改仅保存在浏览器工作区。请导出 PDF 以保留当前结果，后续修改需再次导出。离开此页、移除文档或清空工作区后，会话修改将丢失。</p>}
 
       <footer className="pdf-local-note">
         <ShieldCheck size={14} />

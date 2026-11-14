@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserPdfEngine } from "./browser-engine";
 import { PdfUserError } from "./types";
+import { webcrypto } from "node:crypto";
 
 const adapter = vi.hoisted(() => ({
   createWorker: vi.fn(),
@@ -41,6 +42,7 @@ class ParserWorker extends EventTarget {
 function syntheticDocument(width = 612, height = 792, originalRotation = 0) {
   const page = {
     rotate: originalRotation,
+    getTextContent: vi.fn(async () => ({ items: [{ str: "SYNTHETIC PAGE" }] })),
     getViewport: vi.fn(({ scale, rotation = originalRotation }: { scale: number; rotation?: number }) => ({
       width: (rotation % 180 === 0 ? width : height) * scale,
       height: (rotation % 180 === 0 ? height : width) * scale,
@@ -305,6 +307,63 @@ describe("browser PDF adapter loading failures", () => {
 });
 
 describe("browser PDF adapter render cleanup", () => {
+  it("inspects real rendering geometry and content digests with bounded temporary pixels", async () => {
+    const fixture = syntheticDocument(420, 594, 90);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const pixelReads: HTMLCanvasElement[] = [];
+    vi.stubGlobal("crypto", webcrypto);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (this: HTMLCanvasElement) {
+      return { getImageData: () => { pixelReads.push(this); return { data: new Uint8ClampedArray([38, 102, 217, 255]) }; } } as unknown as CanvasRenderingContext2D;
+    });
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const result = await handle.inspectPage!(1, signal(), 90);
+    expect(result).toMatchObject({ width: 420, height: 594, rotation: 180 });
+    expect(result.textDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.visualDigest).toMatch(/^[a-f0-9]{64}$/);
+    const viewport = fixture.page.render.mock.calls[0][0].viewport;
+    expect(Math.max(viewport.width, viewport.height)).toBe(128);
+    expect(pixelReads).toHaveLength(1);
+    expect([pixelReads[0].width, pixelReads[0].height]).toEqual([0, 0]);
+    expect(adapter.getDocument).toHaveBeenCalledOnce();
+    fixture.page.getTextContent.mockResolvedValue({ items: [{ str: "DIFFERENT SYNTHETIC PAGE" }] });
+    const changed = await handle.inspectPage!(1, signal(), 90);
+    expect(changed.textDigest).not.toBe(result.textDigest);
+    expect(changed.visualDigest).toBe(result.visualDigest);
+  });
+
+  it("inspection failures never reveal extracted document text", async () => {
+    const fixture = syntheticDocument();
+    fixture.page.getTextContent.mockRejectedValue(new Error("SYNTHETIC DOCUMENT CONTENT"));
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    await expect(handle.inspectPage!(1, signal())).rejects.toThrow("无法验证页面内容");
+    expect(fixture.page.render).not.toHaveBeenCalled();
+  });
+
+  it.each(["abort", "timeout", "destroy"])("cancels inspection and releases its temporary canvas after %s", async (reason) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async () => new ArrayBuffer(32)) } });
+    const fixture = syntheticDocument();
+    const rendering = pendingRender();
+    fixture.page.render.mockReturnValue(rendering.task);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const controller = new AbortController();
+    const inspected = handle.inspectPage!(1, controller.signal);
+    const rejected = reason === "timeout" ? expect(inspected).rejects.toThrow("验证耗时过长")
+      : expect(inspected).rejects.toHaveProperty("name", "AbortError");
+    await vi.waitFor(() => expect(fixture.page.render).toHaveBeenCalledOnce());
+    const canvas = fixture.page.render.mock.calls[0][0].canvas;
+    expect(Math.max(canvas.width, canvas.height)).toBeLessThanOrEqual(128);
+    if (reason === "abort") controller.abort();
+    if (reason === "timeout") await vi.advanceTimersByTimeAsync(20_000);
+    if (reason === "destroy") await handle.destroy();
+    await rejected;
+    expect(rendering.task.cancel).toHaveBeenCalled();
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([0, 90, 180, 270])("combines the source rotation %i with editing deltas without reparsing or changing source data", async (originalRotation) => {
     const fixture = syntheticDocument(420, 594, originalRotation);
     adapter.getDocument.mockReturnValue(fixture.task);

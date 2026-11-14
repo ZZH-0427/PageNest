@@ -107,9 +107,7 @@ export class BrowserPdfEngine implements PdfEngine {
       const renderTasks = new Set<RenderTask>();
       const disposed = new AbortController();
       let destruction: Promise<void> | undefined;
-      return {
-        pages,
-        render: async (number, canvas, renderSignal, rotationDelta = 0) => {
+      const renderPage = async (number: number, canvas: HTMLCanvasElement, renderSignal: AbortSignal, rotationDelta = 0, maxWidth = 320, maxHeight = 440) => {
           const time = deadline(AbortSignal.any([renderSignal, disposed.signal, this.lifetime.signal]), 20_000, "此页面渲染耗时过长，已停止预览。");
           let renderTask: RenderTask | undefined;
           let cancel: (() => void) | undefined;
@@ -121,7 +119,7 @@ export class BrowserPdfEngine implements PdfEngine {
             // PDF.js expects an absolute angle. Keep the source /Rotate intact.
             const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
             const original = page.getViewport({ scale: 1, rotation });
-            const scale = Math.min(320 / original.width, 440 / original.height);
+            const scale = Math.min(maxWidth / original.width, maxHeight / original.height);
             const viewport = page.getViewport({ scale, rotation });
             canvas.width = Math.max(1, Math.floor(viewport.width));
             canvas.height = Math.max(1, Math.floor(viewport.height));
@@ -139,6 +137,42 @@ export class BrowserPdfEngine implements PdfEngine {
             }
             page?.cleanup();
             if (time.signal.aborted) { canvas.width = 0; canvas.height = 0; }
+            time.clear();
+          }
+      };
+      return {
+        pages,
+        render: renderPage,
+        inspectPage: async (number, inspectSignal, rotationDelta = 0) => {
+          const time = deadline(AbortSignal.any([inspectSignal, disposed.signal, this.lifetime.signal]), 20_000, "页面内容验证耗时过长，未提供下载。请尝试较小的文件。");
+          const canvas = globalThis.document.createElement("canvas");
+          let page;
+          try {
+            time.signal.throwIfAborted();
+            page = await abortable(document.getPage(number), time.signal);
+            const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
+            const viewport = page.getViewport({ scale: 1, rotation });
+            const content = await abortable(page.getTextContent(), time.signal);
+            const text = JSON.stringify(content.items.filter((item) => "str" in item).map((item) => "str" in item ? item.str : ""));
+            const digest = async (bytes: Uint8Array<ArrayBuffer>) => {
+              const hash = await abortable(crypto.subtle.digest("SHA-256", bytes), time.signal);
+              return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
+            };
+            const textDigest = await digest(new TextEncoder().encode(text));
+            await renderPage(number, canvas, time.signal, rotationDelta, 128, 128);
+            time.signal.throwIfAborted();
+            const context = canvas.getContext("2d");
+            if (!context) throw new PdfUserError("浏览器无法验证页面内容，未提供下载。");
+            const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            const visualDigest = await digest(new Uint8Array(pixels));
+            time.signal.throwIfAborted();
+            return { textDigest, visualDigest, width: viewport.width, height: viewport.height, rotation };
+          } catch {
+            if (time.signal.aborted) throw time.signal.reason;
+            throw new PdfUserError("无法验证页面内容，未提供下载。请尝试其他文件。");
+          } finally {
+            canvas.width = canvas.height = 0;
+            page?.cleanup();
             time.clear();
           }
         },

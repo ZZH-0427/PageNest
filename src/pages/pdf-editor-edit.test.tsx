@@ -385,6 +385,35 @@ describe("PDF editing integration", () => {
     expect(screen.queryByRole("button", { name: "撤销" })).not.toBeInTheDocument();
   });
 
+  it("isolates filename editing shortcuts and resets the export panel when the document changes", async () => {
+    const { user } = await setup(["first.pdf", "second.pdf"]);
+    await user.click(button("顺时针旋转 90°"));
+    await user.click(button("导出 PDF"));
+    expect(button("导出 PDF")).toHaveAttribute("aria-expanded", "true");
+    const filename = screen.getByRole("textbox", { name: "导出文件名" });
+    expect(filename).toHaveFocus();
+    expect(filename).toHaveValue("first_edited.pdf");
+    await user.keyboard("{Control>}a{/Control}{Delete}");
+    expect(filename).toHaveValue("");
+    fireEvent.keyDown(filename, { key: "z", ctrlKey: true });
+    fireEvent.keyDown(filename, { key: "z", metaKey: true });
+    fireEvent.keyDown(filename, { key: "y", ctrlKey: true });
+    fireEvent.keyDown(filename, { key: "Escape" });
+    expect(sourceOrder()).toEqual([1, 2, 3]);
+    expect(page(1)).toHaveAttribute("data-rotation", "90");
+    expect(selectedNumbers()).toEqual([1]);
+    await user.click(button("查看 second.pdf（文件 2）"));
+    expect(screen.getByRole("textbox", { name: "导出文件名" })).toHaveValue("second_edited.pdf");
+    expect(page(1)).toHaveAttribute("data-rotation", "0");
+    await user.click(button("关闭导出设置"));
+    expect(screen.queryByRole("region", { name: "PDF 导出设置" })).not.toBeInTheDocument();
+    expect(button("导出 PDF")).toHaveAttribute("aria-expanded", "false");
+    await user.click(button("导出 PDF"));
+    await user.click(button("清空工作区"));
+    expect(screen.queryByRole("region", { name: "PDF 导出设置" })).not.toBeInTheDocument();
+    expect(button("导出 PDF")).toBeDisabled();
+  });
+
   it("warns on refresh only while edits differ from the source and removes listeners on cleanup", async () => {
     const { user, unmount } = await setup();
     const beforeUnload = () => {

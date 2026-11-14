@@ -64,6 +64,7 @@ describe("PDF workspace user interface", () => {
     expect(screen.getByRole("heading", { name: "PDF 页面管理" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "放入 PDF，让页面呈现。" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "清空工作区" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "导出 PDF" })).toBeDisabled();
     expect(screen.getByText("最多 20 个 · 累计 ≤ 256 MiB")).toBeInTheDocument();
     expect(screen.getByText("每份文档最多 1,000 页")).toBeInTheDocument();
     expect(screen.getByText(/离开此页或刷新后，PDF 工作区将清空/)).toBeInTheDocument();
@@ -170,19 +171,21 @@ describe("PDF workspace user interface", () => {
     model.state = { files: [{ ...documentEntry("pending", 1), status, pages: [] }], selectedId: "pending", notice: null };
     render(<PdfEditor />);
     expect(screen.getByRole("status")).toHaveTextContent("你可以切换文档，或移除文件来取消。");
+    expect(screen.getByRole("button", { name: "导出 PDF" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "第 1 页" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "移除 synthetic.pdf（文件 1）" }));
     expect(model.workspace.removeFile).toHaveBeenCalledWith("pending");
   });
 
-  it("keeps export and document assembly disabled and exposes keyboard-operable file selection", async () => {
+  it("keeps document assembly disabled, enables single-file export and exposes keyboard-operable file selection", async () => {
     const user = userEvent.setup();
     model.state = { files: [documentEntry("one", 1)], selectedId: "one", notice: null };
     render(<PdfEditor />);
-    for (const name of ["拆分", "合并", "导出 PDF"]) {
+    for (const name of ["拆分", "合并"]) {
       expect(screen.getByRole("button", { name })).toBeDisabled();
     }
-    expect(screen.getByText(/拆分、合并和导出将在后续阶段开放/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "导出 PDF" })).toBeEnabled();
+    expect(screen.getByText(/拆分与多文件合并将在后续阶段开放/)).toBeInTheDocument();
     const fileButton = screen.getByRole("button", { name: "查看 synthetic.pdf（文件 1）" });
     fileButton.focus();
     expect(fileButton).toHaveFocus();

@@ -22,13 +22,15 @@
     "audit:files": "node scripts/audit-public-files.mjs",
     "check": "npm run typecheck && npm run lint && npm test && npm run build && npm run audit:files",
     "test:security": "node --test scripts/audit-public-files.test.mjs",
-    "test:pdf-engine": "node --test scripts/test-pdf-engine.mjs"
+    "test:pdf-engine": "node --test scripts/test-pdf-engine.mjs",
+    "test:pdf-export": "vitest run src/pdf/export-real.test.mjs"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^0.577.0",
+    "pdf-lib": "1.17.1",
     "pdfjs-dist": "6.5.438",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

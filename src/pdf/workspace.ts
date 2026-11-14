@@ -1,12 +1,16 @@
 import { BrowserPdfEngine } from "./browser-engine";
 import { TaskQueue } from "./task-queue";
+import { PdfExportController, type PdfExportSource } from "./export-controller";
+import { generateEditedPdf } from "./export";
+import { validateEditedPdf } from "./export-validation";
+import { readPdfBytes } from "./validation";
 import {
   clearEditSelection, createEditState, deleteEditSelection, moveEditPage, redoEdit,
   rotateEditSelection, selectAllEditPages, selectEditPage, undoEdit,
   type PageSelectionModifiers, type PdfEditState,
 } from "./edit";
 import {
-  abortError, isCancellation, pdfErrorMessage, MAX_PDF_FILES,
+  abortError, isCancellation, pdfErrorMessage, PdfUserError, MAX_PDF_FILES,
   MAX_PDF_FILE_BYTES, MAX_WORKSPACE_BYTES, MAX_RENDER_TASKS,
   type PdfDocumentHandle, type PdfEngine, type PdfFileEntry,
 } from "./types";
@@ -20,6 +24,7 @@ export interface PdfWorkspaceState {
 interface Resource {
   controller: AbortController;
   document?: PdfDocumentHandle;
+  source?: File;
 }
 
 /** Owns PDF data only while the PDF page is mounted. No global file state or storage. */
@@ -32,6 +37,7 @@ export class PdfWorkspace {
   private engine: PdfEngine | null = null;
   private ordinal = 0;
   private active = true;
+  readonly exporter = new PdfExportController((id) => this.captureExportSource(id));
 
   constructor(private readonly engineFactory: () => PdfEngine = () => new BrowserPdfEngine()) {}
 
@@ -68,7 +74,7 @@ export class PdfWorkspace {
         id: crypto.randomUUID(), name: file.name, size: file.size,
         ordinal: ++this.ordinal, status: "queued", pages: [], selectedPage: 1, edit: null, error: null,
       };
-      const resource = { controller: new AbortController() };
+      const resource: Resource = { controller: new AbortController(), source: file };
       this.resources.set(entry.id, resource);
       bytes += file.size;
       entries.push(entry);
@@ -87,6 +93,7 @@ export class PdfWorkspace {
         this.update(entry.id, { status: "ready", pages: document.pages, edit: createEditState(entry.id, document.pages) });
       }, resource.controller.signal).catch((error: unknown) => {
         if (!isCancellation(error) && !resource.controller.signal.aborted) {
+          resource.source = undefined;
           this.update(entry.id, { status: "error", error: pdfErrorMessage(error), pages: [] });
         }
       });
@@ -149,6 +156,69 @@ export class PdfWorkspace {
   undo(id: string) { this.edit(id, undoEdit); }
   redo(id: string) { this.edit(id, redoEdit); }
 
+  /** Only this capability can reread the retained File; no public byte getter survives removal. */
+  private captureExportSource(id: string): PdfExportSource {
+    const entry = this.state.files.find((file) => file.id === id);
+    const resource = this.resources.get(id);
+    const engine = this.engine;
+    if (!this.active || entry?.status !== "ready" || !entry.edit?.present.pages.length || !resource?.source || !resource.document || !engine) {
+      throw new PdfUserError("当前 PDF 不可导出，请先导入并等待解析完成。");
+    }
+    const request = {
+      documentId: id,
+      pages: entry.edit.present.pages.map((page) => ({ ...page })),
+      originalPages: entry.pages.map((page) => ({ ...page })),
+    };
+    const assertCurrent = (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      if (!this.active || this.resources.get(id) !== resource || !resource.source || !resource.document) throw abortError();
+    };
+    return {
+      documentId: id, sourceName: entry.name, pageCount: request.pages.length,
+      signal: resource.controller.signal,
+      generate: async (signal, onStage) => {
+        assertCurrent(signal);
+        // This single read is temporary. PDF.js already owns its independent preview data.
+        let sourceBytes: Uint8Array<ArrayBuffer> | null = await readPdfBytes(resource.source!, signal);
+        let bytes: Uint8Array;
+        try {
+          assertCurrent(signal);
+          onStage("generating");
+          bytes = await generateEditedPdf(sourceBytes, request, signal);
+        } finally {
+          // Erase the temporary reread even if generation fails or is cancelled.
+          sourceBytes.fill(0);
+          sourceBytes = null;
+        }
+        assertCurrent(signal);
+        if (bytes.byteLength > MAX_PDF_FILE_BYTES) throw new PdfUserError("生成结果超过 100 MiB，未创建下载。请减少页面或使用更小的文件。");
+        onStage("validating");
+        let output: PdfDocumentHandle | undefined;
+        try {
+          const file = new File([bytes as Uint8Array<ArrayBuffer>], "validation.pdf", { type: "application/pdf" });
+          output = await engine.open(file, signal, () => {});
+          assertCurrent(signal);
+          const validatedOutput = output;
+          await this.renders.run(() => validateEditedPdf(resource.document!, validatedOutput, request.pages, signal), signal);
+          assertCurrent(signal);
+          return bytes;
+        } finally {
+          if (output) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await Promise.race([
+                output.destroy(),
+                new Promise<never>((_resolve, reject) => {
+                  timer = setTimeout(() => reject(new PdfUserError("PDF 验证资源未能及时释放。请清空工作区并刷新后重试。")), 3000);
+                }),
+              ]);
+            } finally { clearTimeout(timer); }
+          }
+        }
+      },
+    };
+  }
+
   async renderPage(id: string, number: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta = 0) {
     const resource = this.resources.get(id);
     if (!resource?.document) throw abortError();
@@ -161,6 +231,7 @@ export class PdfWorkspace {
     if (!resource) return;
     this.resources.delete(id);
     resource.controller.abort();
+    resource.source = undefined;
     void resource.document?.destroy().catch(() => {});
     const files = this.state.files.filter((file) => file.id !== id);
     this.publish({ files, selectedId: this.state.selectedId === id ? files[0]?.id ?? null : this.state.selectedId, notice: null });
@@ -168,8 +239,10 @@ export class PdfWorkspace {
   }
 
   clear() {
+    this.exporter.cancel();
     for (const resource of this.resources.values()) {
       resource.controller.abort();
+      resource.source = undefined;
       void resource.document?.destroy().catch(() => {});
     }
     this.resources.clear();
