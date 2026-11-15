@@ -1,7 +1,8 @@
 import workerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
-import type { PDFDocumentLoadingTask, PDFWorker, RenderTask } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFPageProxy, PDFWorker, RenderTask } from "pdfjs-dist";
 import { readPdfBytes, validatePdfHeader } from "./validation";
-import { MAX_PDF_PAGES, PdfUserError, type PdfDocumentHandle, type PdfEngine, type PdfPageInfo } from "./types";
+import { PdfExportDiagnosticError, type PdfExportDiagnosticItem } from "./export-diagnostics";
+import { MAX_PDF_PAGES, PdfUserError, type PdfDocumentHandle, type PdfEngine, type PdfOpenOptions, type PdfPageInfo } from "./types";
 
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -12,9 +13,58 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
-function deadline(signal: AbortSignal, milliseconds: number, message: string) {
+/** Cancellation must not wait forever for a worker render acknowledgement. */
+async function settleRender(task: RenderTask): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      task.promise.then(() => true, () => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 3000); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
+
+type SignatureValue = number | boolean | string | null | SignatureValue[];
+
+/** A bounded graphics subset, excluding document IDs, glyphs, images, patterns and dependency objects. */
+function graphicsSignatureData(list: Awaited<ReturnType<PDFPageProxy["getOperatorList"]>>, ops: Record<string, number>): SignatureValue[] {
+  const names = ["save", "restore", "transform", "setLineWidth", "setLineCap", "setLineJoin", "setMiterLimit", "setDash", "setFlatness",
+    "moveTo", "lineTo", "curveTo", "curveTo2", "curveTo3", "closePath", "rectangle", "stroke", "closeStroke", "fill", "eoFill",
+    "fillStroke", "eoFillStroke", "closeFillStroke", "closeEOFillStroke", "endPath", "clip", "eoClip", "constructPath",
+    "setStrokeGray", "setFillGray", "setStrokeRGBColor", "setFillRGBColor", "setStrokeCMYKColor", "setFillCMYKColor",
+    "setStrokeTransparent", "setFillTransparent"];
+  const selected = new Set(names.map((name) => ops[name]).filter(Number.isInteger));
+  const rgb = new Set([ops.setStrokeRGBColor, ops.setFillRGBColor]);
+  const unavailable = () => new Error("Render signature unavailable");
+  if (list.fnArray.length > 50_000 || list.fnArray.length !== list.argsArray.length) throw unavailable();
+  let values = 0;
+  const normalize = (value: unknown, allowColor: boolean, depth = 0): SignatureValue => {
+    if (++values > 100_000 || depth > 12) throw unavailable();
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (allowColor && typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value)) return value;
+    if (Array.isArray(value)) {
+      if (value.length > 100_000 - values) throw unavailable();
+      return value.map((entry) => normalize(entry, allowColor, depth + 1));
+    }
+    if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+      const array = value as unknown as ArrayLike<unknown>;
+      if (array.length > 100_000 - values) throw unavailable();
+      return [Object.prototype.toString.call(value), Array.from(array, (entry) => normalize(entry, false, depth + 1))];
+    }
+    throw unavailable();
+  };
+  const result: SignatureValue[] = [];
+  for (let index = 0; index < list.fnArray.length; index++) {
+    const operation = list.fnArray[index];
+    if (selected.has(operation)) result.push([operation, normalize(list.argsArray[index], rgb.has(operation))]);
+  }
+  return result;
+}
+
+function deadline(signal: AbortSignal, milliseconds: number, failure: string | PdfUserError) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new PdfUserError(message)), milliseconds);
+  const timer = setTimeout(() => controller.abort(typeof failure === "string" ? new PdfUserError(failure) : failure), milliseconds);
   return { signal: AbortSignal.any([signal, controller.signal]), clear: () => clearTimeout(timer) };
 }
 
@@ -65,7 +115,8 @@ export class BrowserPdfEngine implements PdfEngine {
     return pdfjs;
   }
 
-  async open(file: File, signal: AbortSignal, onStatus: (status: "reading" | "parsing") => void): Promise<PdfDocumentHandle> {
+  async open(file: File, signal: AbortSignal, onStatus: (status: "reading" | "parsing") => void, options?: PdfOpenOptions): Promise<PdfDocumentHandle> {
+    const fontPaths = options?.fontMode === "paths";
     const timed = deadline(AbortSignal.any([signal, this.lifetime.signal]), 60_000, "此 PDF 读取或解析耗时过长，已停止。请尝试更小或更简单的文档。");
     const currentSignal = timed.signal;
     let task: PDFDocumentLoadingTask | undefined;
@@ -83,6 +134,7 @@ export class BrowserPdfEngine implements PdfEngine {
         standardFontDataUrl: `${assets}standard_fonts/`,
         wasmUrl: `${assets}wasm/`, iccUrl: `${assets}iccs/`,
         canvasMaxAreaInBytes: 16 * 1024 ** 2,
+        ...(fontPaths ? { disableFontFace: true, useSystemFonts: false } : {}),
       });
       this.tasks.add(task);
       // No onPassword callback: PDF.js rejects with PasswordException instead of waiting for input.
@@ -107,11 +159,12 @@ export class BrowserPdfEngine implements PdfEngine {
       const renderTasks = new Set<RenderTask>();
       const disposed = new AbortController();
       let destruction: Promise<void> | undefined;
-      const renderPage = async (number: number, canvas: HTMLCanvasElement, renderSignal: AbortSignal, rotationDelta = 0, maxWidth = 320, maxHeight = 440) => {
+      const renderPage = async (number: number, canvas: HTMLCanvasElement, renderSignal: AbortSignal, rotationDelta = 0, maxWidth = 320, maxHeight = 440, inspectRender?: (page: PDFPageProxy, viewport: ReturnType<PDFPageProxy["getViewport"]>, signal: AbortSignal) => Promise<void>) => {
           const time = deadline(AbortSignal.any([renderSignal, disposed.signal, this.lifetime.signal]), 20_000, "此页面渲染耗时过长，已停止预览。");
           let renderTask: RenderTask | undefined;
           let cancel: (() => void) | undefined;
           let page;
+          let cleanupFailed = false;
           try {
             time.signal.throwIfAborted();
             page = await abortable(document.getPage(number), time.signal);
@@ -128,30 +181,50 @@ export class BrowserPdfEngine implements PdfEngine {
             cancel = () => renderTask?.cancel();
             time.signal.addEventListener("abort", cancel, { once: true });
             await abortable(renderTask.promise, time.signal);
+            if (inspectRender) await inspectRender(page, viewport, time.signal);
           } finally {
-            if (cancel) time.signal.removeEventListener("abort", cancel);
-            if (renderTask) {
-              if (time.signal.aborted) renderTask.cancel();
-              await renderTask.promise.catch(() => {});
-              renderTasks.delete(renderTask);
+            try {
+              if (cancel) time.signal.removeEventListener("abort", cancel);
+              if (renderTask) {
+                try {
+                  if (time.signal.aborted) {
+                    canvas.width = canvas.height = 0;
+                    renderTask.cancel();
+                  }
+                  if (!await settleRender(renderTask)) cleanupFailed = true;
+                } finally { renderTasks.delete(renderTask); }
+              }
+              page?.cleanup();
+            } catch {
+              cleanupFailed = true;
+            } finally {
+              if (time.signal.aborted || cleanupFailed) { canvas.width = 0; canvas.height = 0; }
+              time.clear();
             }
-            page?.cleanup();
-            if (time.signal.aborted) { canvas.width = 0; canvas.height = 0; }
-            time.clear();
+          }
+          if (cleanupFailed) {
+            time.signal.throwIfAborted();
+            throw new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage: "cleanup", item: "resources" });
           }
       };
       return {
         pages,
         render: renderPage,
-        inspectPage: async (number, inspectSignal, rotationDelta = 0) => {
-          const time = deadline(AbortSignal.any([inspectSignal, disposed.signal, this.lifetime.signal]), 20_000, "页面内容验证耗时过长，未提供下载。请尝试较小的文件。");
+        inspectPage: async (number, inspectSignal, rotationDelta = 0, includeRenderSignature = false) => {
+          const time = deadline(AbortSignal.any([inspectSignal, disposed.signal, this.lifetime.signal]), 20_000,
+            new PdfExportDiagnosticError("VALIDATION_TIMEOUT", { stage: "inspection", item: "deadline" }));
           const canvas = globalThis.document.createElement("canvas");
           let page;
+          let item: PdfExportDiagnosticItem = "page";
+          let cleanupFailed = false;
+          let result: Awaited<ReturnType<NonNullable<PdfDocumentHandle["inspectPage"]>>>;
+          let scratch: Uint8Array<ArrayBuffer> | undefined;
           try {
             time.signal.throwIfAborted();
             page = await abortable(document.getPage(number), time.signal);
             const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
             const viewport = page.getViewport({ scale: 1, rotation });
+            item = "text";
             const content = await abortable(page.getTextContent(), time.signal);
             const text = JSON.stringify(content.items.filter((item) => "str" in item).map((item) => "str" in item ? item.str : ""));
             const digest = async (bytes: Uint8Array<ArrayBuffer>) => {
@@ -159,22 +232,55 @@ export class BrowserPdfEngine implements PdfEngine {
               return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, "0")).join("");
             };
             const textDigest = await digest(new TextEncoder().encode(text));
-            await renderPage(number, canvas, time.signal, rotationDelta, 128, 128);
+            item = "visual";
+            let renderSignature: { viewport: string; graphics: string } | undefined;
+            const inspectRender = includeRenderSignature ? async (rendered: PDFPageProxy, renderedViewport: ReturnType<PDFPageProxy["getViewport"]>, renderSignal: AbortSignal) => {
+              try {
+                const { viewBox, transform, userUnit } = renderedViewport;
+                if (viewBox.length !== 4 || transform.length !== 6 || ![...viewBox, ...transform, userUnit].every(Number.isFinite)) return;
+                const operators = await abortable(rendered.getOperatorList(), renderSignal);
+                const graphics = graphicsSignatureData(operators, pdfjs.OPS);
+                const hashJson = async (value: unknown) => {
+                  const encoded = new TextEncoder().encode(JSON.stringify(value));
+                  try {
+                    if (encoded.byteLength > 2 * 1024 ** 2) throw new Error("Render signature unavailable");
+                    return await digest(encoded);
+                  } finally { encoded.fill(0); }
+                };
+                renderSignature = { viewport: await hashJson({ viewBox, transform, userUnit }), graphics: await hashJson(graphics) };
+              } catch {
+                if (renderSignal.aborted) throw renderSignal.reason;
+                // Optional diagnosis never substitutes for the exact text and pixel checks.
+              }
+            } : undefined;
+            await renderPage(number, canvas, time.signal, rotationDelta, 128, 128, inspectRender);
             time.signal.throwIfAborted();
             const context = canvas.getContext("2d");
             if (!context) throw new PdfUserError("浏览器无法验证页面内容，未提供下载。");
             const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
-            const visualDigest = await digest(new Uint8Array(pixels));
+            scratch = new Uint8Array(pixels);
+            const visualDigest = await digest(scratch);
             time.signal.throwIfAborted();
-            return { textDigest, visualDigest, width: viewport.width, height: viewport.height, rotation };
-          } catch {
+            result = { textDigest, visualDigest, width: viewport.width, height: viewport.height, rotation,
+              visualSample: { width: canvas.width, height: canvas.height, pixels: scratch },
+              ...(renderSignature ? { renderSignature } : {}) };
+          } catch (error) {
+            scratch?.fill(0);
             if (time.signal.aborted) throw time.signal.reason;
-            throw new PdfUserError("无法验证页面内容，未提供下载。请尝试其他文件。");
+            if (error instanceof PdfExportDiagnosticError) throw error;
+            throw new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage: "inspection", item });
           } finally {
             canvas.width = canvas.height = 0;
-            page?.cleanup();
-            time.clear();
+            try { page?.cleanup(); }
+            catch { cleanupFailed = true; }
+            finally { time.clear(); }
           }
+          if (cleanupFailed) {
+            scratch?.fill(0);
+            time.signal.throwIfAborted();
+            throw new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage: "cleanup", item: "resources" });
+          }
+          return result;
         },
         destroy: () => {
           if (destruction) return destruction;

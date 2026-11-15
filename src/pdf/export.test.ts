@@ -3,20 +3,22 @@ import { createEditState } from "./edit";
 import { defaultExportFilename, generateEditedPdf, sanitizePdfFilename, type PdfExportRequest } from "./export";
 import { PdfUserError } from "./types";
 
-const library = vi.hoisted(() => ({ load: vi.fn(), create: vi.fn(), degrees: vi.fn((angle: number) => ({ angle })) }));
+const library = vi.hoisted(() => ({ load: vi.fn(), create: vi.fn(), degrees: vi.fn((angle: number) => ({ angle })), copyPages: vi.fn() }));
+vi.mock("./export-copy", () => ({ copyEditedPages: library.copyPages }));
 vi.mock("pdf-lib", () => ({ PDFDocument: { load: library.load, create: library.create }, degrees: library.degrees }));
 const bytes = new TextEncoder().encode("%PDF-1.7\nSYNTHETIC INPUT");
 const originalPages = [{ number: 1, width: 594, height: 420, rotation: 90, orientation: "landscape" as const }];
 const request = (): PdfExportRequest => ({ documentId: "source", pages: createEditState("source", originalPages).present.pages, originalPages });
-let copied: { setRotation: ReturnType<typeof vi.fn> };
+let copied: { getRotation: () => { angle: number }; setRotation: ReturnType<typeof vi.fn> };
 let output: { copyPages: ReturnType<typeof vi.fn>; addPage: ReturnType<typeof vi.fn>; save: ReturnType<typeof vi.fn> };
 
 beforeEach(() => {
-  library.load.mockReset(); library.create.mockReset(); library.degrees.mockClear();
-  copied = { setRotation: vi.fn() };
+  library.load.mockReset(); library.create.mockReset(); library.degrees.mockClear(); library.copyPages.mockReset();
+  copied = { getRotation: () => ({ angle: 90 }), setRotation: vi.fn() };
   output = { copyPages: vi.fn(async () => [copied]), addPage: vi.fn(), save: vi.fn(async () => new TextEncoder().encode("%PDF-1.7\nSYNTHETIC OUTPUT")) };
   library.load.mockResolvedValue({ getPageCount: () => 1, getPage: () => ({ getRotation: () => ({ angle: 90 }) }) });
   library.create.mockResolvedValue(output);
+  library.copyPages.mockImplementation(async (_source, destination, indices) => destination.copyPages(_source, indices));
 });
 
 describe("safe PDF filenames", () => {

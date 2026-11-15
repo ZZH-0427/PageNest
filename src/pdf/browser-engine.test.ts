@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserPdfEngine } from "./browser-engine";
-import { PdfUserError } from "./types";
+import { PdfUserError, type PdfEngine, type PdfOpenOptions } from "./types";
 import { webcrypto } from "node:crypto";
 
 const adapter = vi.hoisted(() => ({
@@ -16,6 +16,7 @@ vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
   version: "6.5.438",
   PDFWorker: { create: adapter.createWorker },
   getDocument: adapter.getDocument,
+  OPS: { save: 10, restore: 11, transform: 12, constructPath: 91, setFillRGBColor: 59, setStrokeRGBColor: 58, setLineWidth: 2 },
 }));
 vi.mock("./validation", async (importOriginal) => ({
   ...await importOriginal<typeof import("./validation")>(),
@@ -42,11 +43,12 @@ class ParserWorker extends EventTarget {
 function syntheticDocument(width = 612, height = 792, originalRotation = 0) {
   const page = {
     rotate: originalRotation,
+    getOperatorList: vi.fn(async (): Promise<{ fnArray: number[]; argsArray: unknown[]; lastChunk: boolean }> => ({ fnArray: [], argsArray: [], lastChunk: true })),
     getTextContent: vi.fn(async () => ({ items: [{ str: "SYNTHETIC PAGE" }] })),
     getViewport: vi.fn(({ scale, rotation = originalRotation }: { scale: number; rotation?: number }) => ({
       width: (rotation % 180 === 0 ? width : height) * scale,
       height: (rotation % 180 === 0 ? height : width) * scale,
-      rotation,
+      rotation, viewBox: [0, 0, width, height], userUnit: 1, transform: [scale, 0, 0, -scale, 0, height * scale],
     })),
     cleanup: vi.fn(),
     render: vi.fn<(options: { canvas: HTMLCanvasElement; viewport: { width: number; height: number; rotation: number }; background: string }) => { promise: Promise<void>; cancel: ReturnType<typeof vi.fn> }>(() => ({ promise: Promise.resolve(), cancel: vi.fn() })),
@@ -238,6 +240,57 @@ describe("browser PDF adapter ownership and local inputs", () => {
   });
 });
 
+describe("browser PDF adapter diagnostic font configuration", () => {
+  it("changes only the font rendering flags when paths are explicitly requested", async () => {
+    const preview = syntheticDocument();
+    const diagnostic = syntheticDocument();
+    adapter.getDocument.mockReturnValueOnce(preview.task).mockReturnValueOnce(diagnostic.task);
+    const parser: PdfEngine = engine();
+    const progress = vi.fn();
+    const previewHandle = await parser.open(file(), signal(), vi.fn());
+    const options: PdfOpenOptions = { fontMode: "paths" };
+    const diagnosticHandle = await parser.open(file(), signal(), progress, options);
+
+    const previewOptions = adapter.getDocument.mock.calls[0][0];
+    const diagnosticOptions = adapter.getDocument.mock.calls[1][0];
+    expect(diagnosticOptions).toEqual({ ...previewOptions, disableFontFace: true, useSystemFonts: false });
+    expect(diagnosticOptions).not.toHaveProperty("fontMode");
+    expect(diagnosticOptions.data).toBe(bytes);
+    expect(diagnosticOptions.worker).toBe(previewOptions.worker);
+    expect(options).toEqual({ fontMode: "paths" });
+    expect(progress.mock.calls).toEqual([["reading"], ["parsing"]]);
+    expect(diagnosticHandle.pages).toEqual(previewHandle.pages);
+    expect(ParserWorker.instances).toHaveLength(1);
+
+    await diagnosticHandle.destroy();
+    expect(preview.task.destroy).not.toHaveBeenCalled();
+    const canvas = document.createElement("canvas");
+    await previewHandle.render(1, canvas, signal());
+    expect(preview.page.render).toHaveBeenCalledWith({ canvas, viewport: expect.objectContaining({ width: 320 }), background: "#ffffff" });
+    expect(sharedWorker.destroy).not.toHaveBeenCalled();
+  });
+
+  it("does not retain diagnostic options for later default or empty-option previews", async () => {
+    adapter.getDocument.mockImplementation(() => syntheticDocument().task);
+    const parser = engine();
+    await parser.open(file(), signal(), vi.fn(), { fontMode: "paths" });
+    await parser.open(file(), signal(), vi.fn());
+    await parser.open(file(), signal(), vi.fn(), {});
+
+    const diagnosticOptions = adapter.getDocument.mock.calls[0][0];
+    const defaultOptions = adapter.getDocument.mock.calls[1][0];
+    const emptyOptions = adapter.getDocument.mock.calls[2][0];
+    expect(diagnosticOptions).toEqual({ ...defaultOptions, disableFontFace: true, useSystemFonts: false });
+    expect(emptyOptions).toEqual(defaultOptions);
+    for (const options of [defaultOptions, emptyOptions]) {
+      expect(options).not.toHaveProperty("disableFontFace");
+      expect(options).not.toHaveProperty("useSystemFonts");
+      expect(options).not.toHaveProperty("isImageDecoderSupported");
+      expect(options).not.toHaveProperty("isOffscreenCanvasSupported");
+    }
+  });
+});
+
 describe("browser PDF adapter loading failures", () => {
   it.each(["error", "messageerror"])("rejects a pending document on worker %s and destroys its loading task", async (eventName) => {
     const task = { promise: deferred<never>().promise, destroy: vi.fn(async () => {}) };
@@ -331,6 +384,57 @@ describe("browser PDF adapter render cleanup", () => {
     expect(changed.visualDigest).toBe(result.visualDigest);
   });
 
+  it("collects only requested render subset hashes and ignores document-specific IDs", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ getImageData: () => ({ data: new Uint8ClampedArray([1, 2, 3, 255]) }) } as unknown as CanvasRenderingContext2D);
+    const fixture = syntheticDocument();
+    const operations = { fnArray: [1, 12, 59, 91, 37, 85], argsArray: [
+      ["synthetic_doc_font"], [1, 0, 0, 1, 10, 20], ["#123456"], [22, [new Float32Array([0, 10, 20])], new Float32Array([0, 0, 30, 40])],
+      ["synthetic_doc_font", 10], ["synthetic_doc_image", 24, 24],
+    ] as unknown[], lastChunk: true };
+    fixture.page.getOperatorList.mockResolvedValue(operations);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const normal = await handle.inspectPage!(1, signal());
+    expect(normal).not.toHaveProperty("renderSignature");
+    expect(fixture.page.getOperatorList).not.toHaveBeenCalled();
+    const first = await handle.inspectPage!(1, signal(), 0, true);
+    expect(first.renderSignature?.viewport).toMatch(/^[a-f0-9]{64}$/);
+    expect(first.renderSignature?.graphics).toMatch(/^[a-f0-9]{64}$/);
+    operations.argsArray[0] = ["another_doc_font"];
+    operations.argsArray[4] = ["another_doc_font", 10];
+    operations.argsArray[5] = ["another_doc_image", 24, 24];
+    const renamed = await handle.inspectPage!(1, signal(), 0, true);
+    expect(renamed.renderSignature).toEqual(first.renderSignature);
+    operations.argsArray[2] = ["#123457"];
+    const recolored = await handle.inspectPage!(1, signal(), 0, true);
+    expect(recolored.renderSignature?.viewport).toBe(first.renderSignature?.viewport);
+    expect(recolored.renderSignature?.graphics).not.toBe(first.renderSignature?.graphics);
+    expect(recolored.textDigest).toBe(first.textDigest);
+    expect(recolored.visualDigest).toBe(first.visualDigest);
+    const originalViewport = fixture.page.getViewport.getMockImplementation()!;
+    fixture.page.getViewport.mockImplementation((options) => ({ ...originalViewport(options), userUnit: 2 }));
+    const resized = await handle.inspectPage!(1, signal(), 0, true);
+    expect(resized.renderSignature?.viewport).not.toBe(recolored.renderSignature?.viewport);
+    expect(resized.renderSignature?.graphics).toBe(recolored.renderSignature?.graphics);
+    expect(JSON.stringify(resized.renderSignature)).not.toContain("synthetic");
+  });
+
+  it.each(["unsupported", "failure", "limit"])("omits optional signatures after %s without weakening normal inspection", async (kind) => {
+    vi.stubGlobal("crypto", webcrypto);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ getImageData: () => ({ data: new Uint8ClampedArray([1, 2, 3, 255]) }) } as unknown as CanvasRenderingContext2D);
+    const fixture = syntheticDocument();
+    if (kind === "failure") fixture.page.getOperatorList.mockRejectedValue(new Error("SYNTHETIC_PRIVATE_OPERATOR_ERROR"));
+    else fixture.page.getOperatorList.mockResolvedValue({ fnArray: [12], argsArray: [kind === "limit" ? Array(100_001).fill(1) : { privateData: "SYNTHETIC_PRIVATE_OPERATOR_ERROR" }], lastChunk: true });
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const result = await handle.inspectPage!(1, signal(), 0, true);
+    expect(result).not.toHaveProperty("renderSignature");
+    expect(result.textDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.visualDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(result)).not.toContain("SYNTHETIC_PRIVATE_OPERATOR_ERROR");
+  });
+
   it("inspection failures never reveal extracted document text", async () => {
     const fixture = syntheticDocument();
     fixture.page.getTextContent.mockRejectedValue(new Error("SYNTHETIC DOCUMENT CONTENT"));
@@ -338,6 +442,125 @@ describe("browser PDF adapter render cleanup", () => {
     const handle = await engine().open(file(), signal(), vi.fn());
     await expect(handle.inspectPage!(1, signal())).rejects.toThrow("无法验证页面内容");
     expect(fixture.page.render).not.toHaveBeenCalled();
+  });
+
+  it.each(["text", "visual"])("classifies %s inspection failures without retaining private exception content", async (item) => {
+    vi.stubGlobal("crypto", webcrypto);
+    const fixture = syntheticDocument();
+    const privateFailure = new Error("SYNTHETIC_PRIVATE_FAILURE_CONTENT");
+    if (item === "text") fixture.page.getTextContent.mockRejectedValue(privateFailure);
+    else fixture.page.render.mockImplementation(() => { throw privateFailure; });
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const error = await handle.inspectPage!(1, signal()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "INSPECTION_FAILURE", diagnostic: { stage: "inspection", item } });
+    expect(String(error)).not.toContain(privateFailure.message);
+    expect(JSON.stringify(error)).not.toContain(privateFailure.message);
+    expect(error).not.toHaveProperty("cause");
+  });
+
+  it("identifies an inspection deadline and releases its render instead of reporting corruption", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async () => new ArrayBuffer(32)) } });
+    const fixture = syntheticDocument();
+    const rendering = pendingRender();
+    fixture.page.render.mockReturnValue(rendering.task);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const inspected = handle.inspectPage!(1, signal());
+    const rejected = expect(inspected).rejects.toMatchObject({
+      code: "VALIDATION_TIMEOUT", diagnostic: { stage: "inspection", item: "deadline" },
+    });
+    await vi.waitFor(() => expect(fixture.page.render).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(20_000);
+    await rejected;
+    expect(rendering.task.cancel).toHaveBeenCalled();
+  });
+
+  it.each(["abort", "timeout", "destroy"])("bounds an unresponsive render settlement after %s without replacing the primary failure", async (reason) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async () => new ArrayBuffer(32)) } });
+    const fixture = syntheticDocument();
+    const stuck = { promise: new Promise<void>(() => {}), cancel: vi.fn() };
+    fixture.page.render.mockReturnValue(stuck);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const controller = new AbortController();
+    const settled = vi.fn();
+    const started = Date.now();
+    const outcome = handle.inspectPage!(1, controller.signal).then(
+      (value) => { settled(); return value; },
+      (error: unknown) => { settled(); return error; },
+    );
+    await vi.waitFor(() => expect(fixture.page.render).toHaveBeenCalledOnce());
+    const canvas = fixture.page.render.mock.calls[0][0].canvas;
+    if (reason === "timeout") await vi.advanceTimersByTimeAsync(20_000 - (Date.now() - started));
+    else if (reason === "destroy") await handle.destroy();
+    else controller.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stuck.cancel).toHaveBeenCalled();
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(settled).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    const error = await outcome;
+    expect(settled).toHaveBeenCalledOnce();
+    if (reason === "timeout") expect(error).toMatchObject({ code: "VALIDATION_TIMEOUT", diagnostic: { stage: "inspection", item: "deadline" } });
+    else if (reason === "abort") expect(error).toBe(controller.signal.reason);
+    else expect(error).toHaveProperty("name", "AbortError");
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves a safe cleanup diagnostic when rendering succeeds but page cleanup fails", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async () => new ArrayBuffer(32)) } });
+    const fixture = syntheticDocument();
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    fixture.page.cleanup.mockImplementation(() => { throw new Error("SYNTHETIC_PRIVATE_CLEANUP_ERROR"); });
+    const error = await handle.inspectPage!(1, signal()).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({ code: "INSPECTION_FAILURE", diagnostic: { stage: "cleanup", item: "resources" } });
+    expect(String(error)).not.toContain("SYNTHETIC_PRIVATE_CLEANUP_ERROR");
+    expect(error).not.toHaveProperty("cause");
+    const canvas = fixture.page.render.mock.calls[0][0].canvas;
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves an inspection failure and clears the deadline when cleanup also throws", async () => {
+    vi.useFakeTimers();
+    const fixture = syntheticDocument();
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    fixture.page.getTextContent.mockRejectedValue(new Error("SYNTHETIC_PRIVATE_TEXT_ERROR"));
+    fixture.page.cleanup.mockImplementation(() => { throw new Error("SYNTHETIC_PRIVATE_CLEANUP_ERROR"); });
+    await expect(handle.inspectPage!(1, signal())).rejects.toMatchObject({
+      code: "INSPECTION_FAILURE", diagnostic: { item: "text", stage: "inspection" },
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["abort", "timeout"])("keeps %s semantics and clears deadlines when page cleanup fails", async (reason) => {
+    vi.useFakeTimers();
+    vi.stubGlobal("crypto", { subtle: { digest: vi.fn(async () => new ArrayBuffer(32)) } });
+    const fixture = syntheticDocument();
+    const rendering = pendingRender();
+    fixture.page.render.mockReturnValue(rendering.task);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    fixture.page.cleanup.mockImplementation(() => { throw new Error("SYNTHETIC_PRIVATE_CLEANUP_ERROR"); });
+    const controller = new AbortController();
+    const inspected = handle.inspectPage!(1, controller.signal);
+    const rejected = reason === "timeout" ? expect(inspected).rejects.toHaveProperty("code", "VALIDATION_TIMEOUT")
+      : expect(inspected).rejects.toHaveProperty("name", "AbortError");
+    await vi.waitFor(() => expect(fixture.page.render).toHaveBeenCalledOnce());
+    if (reason === "timeout") await vi.advanceTimersByTimeAsync(20_000);
+    else controller.abort();
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
+    const canvas = fixture.page.render.mock.calls[0][0].canvas;
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
   });
 
   it.each(["abort", "timeout", "destroy"])("cancels inspection and releases its temporary canvas after %s", async (reason) => {

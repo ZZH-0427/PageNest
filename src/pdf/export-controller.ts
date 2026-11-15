@@ -1,4 +1,5 @@
 import { sanitizePdfFilename } from "./export";
+import { PdfExportDiagnosticError } from "./export-diagnostics";
 import { isCancellation, MAX_PDF_FILE_BYTES, PdfUserError } from "./types";
 
 export type PdfExportStage = "idle" | "preparing" | "generating" | "validating" | "ready" | "error" | "cancelling" | "downloaded";
@@ -95,7 +96,9 @@ export class PdfExportController {
       source.signal.addEventListener("abort", cancel, { once: true });
       this.detachSource = () => source.signal.removeEventListener("abort", cancel);
       this.publish({ sourceName: source.sourceName, pageCount: source.pageCount });
-      timeout = setTimeout(() => controller.abort(new PdfUserError("导出耗时过长。请尝试更小或更简单的 PDF。")), 300_000);
+      timeout = setTimeout(() => controller.abort(this.state.stage === "validating"
+        ? new PdfExportDiagnosticError("VALIDATION_TIMEOUT", { stage: "validating", item: "deadline" })
+        : new PdfUserError("导出耗时过长。请尝试更小或更简单的 PDF。")), 300_000);
       const signal = AbortSignal.any([controller.signal, source.signal]);
       const bytes = await source.generate(signal, (stage) => {
         signal.throwIfAborted();

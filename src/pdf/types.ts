@@ -32,14 +32,23 @@ export interface PdfFileEntry {
 export interface PdfDocumentHandle {
   pages: PdfPageInfo[];
   render(page: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta?: number): Promise<void>;
-  inspectPage?(page: number, signal: AbortSignal, rotationDelta?: number): Promise<{
+  inspectPage?(page: number, signal: AbortSignal, rotationDelta?: number, includeRenderSignature?: boolean): Promise<{
     textDigest: string; visualDigest: string; width: number; height: number; rotation: number;
+    /** Bounded transient comparison scratch, never UI state, storage or diagnostics. Caller erases it. */
+    visualSample?: { width: number; height: number; pixels: Uint8Array };
+    /** Optional in-memory subset hashes; diagnostics may expose equality booleans only. */
+    renderSignature?: { viewport: string; graphics: string };
   }>;
   destroy(): Promise<void>;
 }
 
+export interface PdfOpenOptions {
+  /** Diagnostic-only font rendering override; normal preview keeps PDF.js defaults. */
+  fontMode?: "paths";
+}
+
 export interface PdfEngine {
-  open(file: File, signal: AbortSignal, onStatus: (status: "reading" | "parsing") => void): Promise<PdfDocumentHandle>;
+  open(file: File, signal: AbortSignal, onStatus: (status: "reading" | "parsing") => void, options?: PdfOpenOptions): Promise<PdfDocumentHandle>;
   destroy(): Promise<void>;
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PdfExportController, type PdfDownloadEnvironment, type PdfExportSource } from "./export-controller";
+import { PdfExportDiagnosticError } from "./export-diagnostics";
 import { PdfUserError } from "./types";
 
 function deferred<T>() {
@@ -140,6 +141,40 @@ describe("export lifecycle and download ownership", () => {
     await run;
     expect(controller.getSnapshot().error).toContain("耗时过长");
     expect(download.createUrl).not.toHaveBeenCalled();
+  });
+
+  it("reports a safe validation deadline code without accepting a late result", async () => {
+    vi.useFakeTimers();
+    const pending = deferred<Uint8Array>();
+    const { controller, download } = setup(async (_signal, stage) => {
+      stage("generating");
+      stage("validating");
+      return pending.promise;
+    });
+    const run = controller.start("synthetic", "test.pdf");
+    await vi.advanceTimersByTimeAsync(300_000);
+    pending.resolve(new Uint8Array([1]));
+    await run;
+    expect(controller.getSnapshot()).toMatchObject({ stage: "error", busy: false });
+    expect(controller.getSnapshot().error).toContain("VALIDATION_TIMEOUT");
+    expect(controller.getSnapshot().error).toContain("phase=validating");
+    expect(controller.getSnapshot().error).toContain("item=deadline");
+    controller.download();
+    expect(download.createUrl).not.toHaveBeenCalled();
+    expect(download.trigger).not.toHaveBeenCalled();
+  });
+
+  it("passes typed safe content diagnostics through the existing error field", async () => {
+    const diagnostic = new PdfExportDiagnosticError("VISUAL_CONTENT_MISMATCH", {
+      stage: "validating", item: "visual", outputPage: 2, sourcePage: 3,
+    });
+    const { controller, download } = setup(async () => { throw diagnostic; });
+    await controller.start("synthetic", "test.pdf");
+    expect(controller.getSnapshot().error).toBe(diagnostic.message);
+    expect(controller.getSnapshot().error).toContain("outputPage=2");
+    expect(controller.getSnapshot().error).toContain("sourcePage=3");
+    controller.download();
+    expect(download.trigger).not.toHaveBeenCalled();
   });
 
   it("unsubscribes listeners", async () => {

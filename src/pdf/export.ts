@@ -1,6 +1,8 @@
 import { normalizeRotation, type PdfEditPage } from "./edit";
+import { copyEditedPages } from "./export-copy";
 import { isCancellation, MAX_PDF_FILE_BYTES, MAX_PDF_PAGES, PdfUserError, type PdfPageInfo } from "./types";
 import { validatePdfHeader } from "./validation";
+import { inspectExportIntegrity, type PdfPageIntegrityEvidence } from "./export-integrity";
 
 export const PDF_EXPORT_COMPATIBILITY_NOTICE = "PageNest 将尽量保留页面的视觉内容，但重新生成 PDF 可能影响签名、表单、书签和其他特殊结构。当前无法可靠识别全部特殊结构，不承诺严格无损导出。";
 
@@ -52,7 +54,8 @@ function validateRequest(request: PdfExportRequest) {
 }
 
 /** Generates bytes only. Ownership, independent validation and download belong to the caller. */
-export async function generateEditedPdf(sourceBytes: Uint8Array, request: PdfExportRequest, signal: AbortSignal): Promise<Uint8Array> {
+export async function generateEditedPdf(sourceBytes: Uint8Array, request: PdfExportRequest, signal: AbortSignal,
+  onIntegrity?: (evidence: readonly PdfPageIntegrityEvidence[]) => void): Promise<Uint8Array> {
   try {
     signal.throwIfAborted();
     validateRequest(request);
@@ -60,28 +63,31 @@ export async function generateEditedPdf(sourceBytes: Uint8Array, request: PdfExp
       throw new PdfUserError("原始 PDF 数据不可用或超出容量限制，无法导出。");
     }
     validatePdfHeader(sourceBytes.subarray(0, 1024));
-    const { PDFDocument, degrees } = await import("pdf-lib");
+    const library = await import("pdf-lib");
+    const { PDFDocument, degrees } = library;
     signal.throwIfAborted();
     const source = await PDFDocument.load(sourceBytes, { ignoreEncryption: false, updateMetadata: false, throwOnInvalidObject: true });
     signal.throwIfAborted();
     if (source.getPageCount() !== request.originalPages.length) throw new PdfUserError("原始 PDF 与当前工作区不一致，无法导出。");
-    for (const page of request.pages) {
-      if (normalizeRotation(source.getPage(page.sourcePageNumber - 1).getRotation().angle) !== normalizeRotation(page.originalRotation)) {
-        throw new PdfUserError("原始页面旋转与当前工作区不一致，无法导出。");
-      }
-    }
     const output = await PDFDocument.create({ updateMetadata: false });
-    // One copy operation shares copied resources across pages instead of duplicating fonts/images.
-    const copied = await output.copyPages(source, request.pages.map((page) => page.sourcePageNumber - 1));
+    const copied = await copyEditedPages(source, output, request.pages.map((page) => page.sourcePageNumber - 1), library, signal);
     signal.throwIfAborted();
     copied.forEach((page, index) => {
       const edit = request.pages[index];
+      if (normalizeRotation(page.getRotation().angle) !== normalizeRotation(edit.originalRotation)) {
+        throw new PdfUserError("原始页面旋转与当前工作区不一致，无法导出。");
+      }
       page.setRotation(degrees(normalizeRotation(edit.originalRotation + edit.rotationDelta)));
       output.addPage(page);
     });
     const bytes = await output.save({ addDefaultPage: false, updateFieldAppearances: false, objectsPerTick: 50 });
     signal.throwIfAborted();
     validatePdfHeader(bytes.subarray(0, 1024));
+    if (onIntegrity) {
+      const evidence = await inspectExportIntegrity(source, bytes, request.pages, library, signal);
+      signal.throwIfAborted();
+      onIntegrity(evidence);
+    }
     return bytes;
   } catch (error) {
     if (signal.aborted) throw signal.reason;

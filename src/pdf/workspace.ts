@@ -3,11 +3,13 @@ import { TaskQueue } from "./task-queue";
 import { PdfExportController, type PdfExportSource } from "./export-controller";
 import { generateEditedPdf } from "./export";
 import { validateEditedPdf } from "./export-validation";
+import { PdfExportDiagnosticError, type PdfExportDiagnostic, type PdfRendererProbeStatus } from "./export-diagnostics";
+import type { PdfPageIntegrityEvidence } from "./export-integrity";
 import { readPdfBytes } from "./validation";
 import {
   clearEditSelection, createEditState, deleteEditSelection, moveEditPage, redoEdit,
   rotateEditSelection, selectAllEditPages, selectEditPage, undoEdit,
-  type PageSelectionModifiers, type PdfEditState,
+  type PageSelectionModifiers, type PdfEditPage, type PdfEditState,
 } from "./edit";
 import {
   abortError, isCancellation, pdfErrorMessage, PdfUserError, MAX_PDF_FILES,
@@ -25,6 +27,59 @@ interface Resource {
   controller: AbortController;
   document?: PdfDocumentHandle;
   source?: File;
+}
+
+type RendererProbeResult = Partial<Pick<PdfExportDiagnostic, "code" | "outputPage" | "sourcePage" | "item" | "visualDifference">>
+  & { status: PdfRendererProbeStatus };
+
+async function releaseValidationHandle(handle: PdfDocumentHandle | undefined): Promise<PdfExportDiagnosticError | undefined> {
+  if (!handle) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      handle.destroy(),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new PdfExportDiagnosticError("VALIDATION_TIMEOUT", {
+        stage: "cleanup", item: "resources",
+      })), 3000); }),
+    ]);
+    return undefined;
+  } catch (error) {
+    return error instanceof PdfExportDiagnosticError ? error
+      : new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage: "cleanup", item: "resources" });
+  }
+  finally { clearTimeout(timer); }
+}
+
+/** Fresh validation documents never borrow the preview handle or its rendering state. */
+async function openValidationDocument(engine: PdfEngine, file: File, signal: AbortSignal, stage: "source-open" | "output-open"): Promise<PdfDocumentHandle> {
+  const parsing = new AbortController();
+  const parsingSignal = AbortSignal.any([signal, parsing.signal]);
+  const timer = setTimeout(() => parsing.abort(new PdfExportDiagnosticError("VALIDATION_TIMEOUT", { stage, item: "deadline" })), 60_000);
+  let opening: Promise<PdfDocumentHandle> | undefined;
+  let acquired: PdfDocumentHandle | undefined;
+  let detach: (() => void) | undefined;
+  try {
+    parsingSignal.throwIfAborted();
+    opening = engine.open(file, parsingSignal, () => {});
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(parsingSignal.reason);
+      parsingSignal.addEventListener("abort", abort, { once: true });
+      detach = () => parsingSignal.removeEventListener("abort", abort);
+      if (parsingSignal.aborted) abort();
+    });
+    acquired = await Promise.race([opening, cancelled]);
+    parsingSignal.throwIfAborted();
+    return acquired;
+  } catch (error) {
+    if (acquired) await releaseValidationHandle(acquired);
+    else if (opening) void opening.then((late) => releaseValidationHandle(late)).catch(() => {});
+    if (parsingSignal.aborted) throw parsingSignal.reason;
+    if (isCancellation(error) || error instanceof PdfExportDiagnosticError) throw error;
+    throw new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage, item: "parser" });
+  } finally {
+    detach?.();
+    clearTimeout(timer);
+  }
 }
 
 /** Owns PDF data only while the PDF page is mounted. No global file state or storage. */
@@ -156,6 +211,47 @@ export class PdfWorkspace {
   undo(id: string) { this.edit(id, undoEdit); }
   redo(id: string) { this.edit(id, redoEdit); }
 
+  /** Diagnostic comparison only: a matching alternate renderer never grants download. */
+  private async probeRenderer(engine: PdfEngine, sourceFile: File, outputFile: File, pages: readonly PdfEditPage[], signal: AbortSignal, fontPaths: boolean): Promise<RendererProbeResult> {
+    let source: PdfDocumentHandle | undefined;
+    let output: PdfDocumentHandle | undefined;
+    const result: RendererProbeResult = { status: "unavailable" };
+    const open = (file: File) => fontPaths
+      ? engine.open(file, signal, () => {}, { fontMode: "paths" })
+      : engine.open(file, signal, () => {});
+    try {
+      signal.throwIfAborted();
+      source = await open(sourceFile);
+      signal.throwIfAborted();
+      output = await open(outputFile);
+      signal.throwIfAborted();
+      const probeSource = source;
+      const probeOutput = output;
+      await this.renders.run(() => validateEditedPdf(probeSource, probeOutput, pages, signal), signal);
+      signal.throwIfAborted();
+      result.status = "match";
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      if (isCancellation(error)) throw error;
+      if (error instanceof PdfExportDiagnosticError) {
+        if (["PAGE_COUNT_MISMATCH", "PAGE_GEOMETRY_MISMATCH", "PAGE_ROTATION_MISMATCH", "TEXT_CONTENT_MISMATCH", "VISUAL_CONTENT_MISMATCH"].includes(error.code)) {
+          result.status = "mismatch";
+        }
+        const failure = error.diagnostic;
+        result.code = failure.code;
+        result.outputPage = failure.outputPage;
+        result.sourcePage = failure.sourcePage;
+        result.item = failure.item;
+        result.visualDifference = failure.visualDifference;
+      }
+    } finally {
+      const released = await Promise.all([releaseValidationHandle(source), releaseValidationHandle(output)]);
+      if (released.some((error) => error !== undefined)) result.status = "unavailable";
+    }
+    signal.throwIfAborted();
+    return result;
+  }
+
   /** Only this capability can reread the retained File; no public byte getter survives removal. */
   private captureExportSource(id: string): PdfExportSource {
     const entry = this.state.files.find((file) => file.id === id);
@@ -181,10 +277,11 @@ export class PdfWorkspace {
         // This single read is temporary. PDF.js already owns its independent preview data.
         let sourceBytes: Uint8Array<ArrayBuffer> | null = await readPdfBytes(resource.source!, signal);
         let bytes: Uint8Array;
+        let integrity: readonly PdfPageIntegrityEvidence[] | undefined;
         try {
           assertCurrent(signal);
           onStage("generating");
-          bytes = await generateEditedPdf(sourceBytes, request, signal);
+          bytes = await generateEditedPdf(sourceBytes, request, signal, (observed) => { integrity = observed; });
         } finally {
           // Erase the temporary reread even if generation fails or is cancelled.
           sourceBytes.fill(0);
@@ -193,28 +290,46 @@ export class PdfWorkspace {
         assertCurrent(signal);
         if (bytes.byteLength > MAX_PDF_FILE_BYTES) throw new PdfUserError("生成结果超过 100 MiB，未创建下载。请减少页面或使用更小的文件。");
         onStage("validating");
+        let validationSource: PdfDocumentHandle | undefined;
         let output: PdfDocumentHandle | undefined;
+        let cleanupFailure: PdfExportDiagnosticError | undefined;
         try {
           const file = new File([bytes as Uint8Array<ArrayBuffer>], "validation.pdf", { type: "application/pdf" });
-          output = await engine.open(file, signal, () => {});
+          validationSource = await openValidationDocument(engine, resource.source!, signal, "source-open");
           assertCurrent(signal);
+          output = await openValidationDocument(engine, file, signal, "output-open");
+          assertCurrent(signal);
+          const validatedSource = validationSource;
           const validatedOutput = output;
-          await this.renders.run(() => validateEditedPdf(resource.document!, validatedOutput, request.pages, signal), signal);
-          assertCurrent(signal);
-          return bytes;
-        } finally {
-          if (output) {
-            let timer: ReturnType<typeof setTimeout> | undefined;
-            try {
-              await Promise.race([
-                output.destroy(),
-                new Promise<never>((_resolve, reject) => {
-                  timer = setTimeout(() => reject(new PdfUserError("PDF 验证资源未能及时释放。请清空工作区并刷新后重试。")), 3000);
-                }),
-              ]);
-            } finally { clearTimeout(timer); }
+          try {
+            await this.renders.run(() => integrity
+              ? validateEditedPdf(validatedSource, validatedOutput, request.pages, signal, integrity)
+              : validateEditedPdf(validatedSource, validatedOutput, request.pages, signal), signal);
+          } catch (error) {
+            assertCurrent(signal);
+            if (!(error instanceof PdfExportDiagnosticError) || error.code !== "VISUAL_CONTENT_MISMATCH") throw error;
+            const baseline = await this.probeRenderer(engine, resource.source!, file, request.pages, signal, false);
+            assertCurrent(signal);
+            const probe = await this.probeRenderer(engine, resource.source!, file, request.pages, signal, true);
+            assertCurrent(signal);
+            throw error.withContext({
+              nativeProbe: baseline.status, nativeProbeCode: baseline.code,
+              nativeProbeOutputPage: baseline.outputPage, nativeProbeSourcePage: baseline.sourcePage,
+              nativeProbeItem: baseline.item, nativeProbeVisualDifference: baseline.visualDifference,
+              rendererProbe: `font-paths-${probe.status}`, probeCode: probe.code,
+              probeOutputPage: probe.outputPage, probeSourcePage: probe.sourcePage,
+              probeItem: probe.item, probeVisualDifference: probe.visualDifference,
+            });
           }
+          assertCurrent(signal);
+        } finally {
+          // Parallel bounded disposal preserves the first validation error.
+          const released = await Promise.all([releaseValidationHandle(validationSource), releaseValidationHandle(output)]);
+          cleanupFailure = released.find((error) => error !== undefined);
         }
+        assertCurrent(signal);
+        if (cleanupFailure) throw cleanupFailure;
+        return bytes;
       },
     };
   }
