@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PdfDocumentHandle, PdfEngine, PdfPageInfo } from "../pdf/types";
 import { PdfEditor } from "./pdf-editor";
+import { PdfExportController } from "../pdf/export-controller";
 
 const engine = vi.hoisted(() => ({
   open: vi.fn<PdfEngine["open"]>(),
@@ -412,6 +413,52 @@ describe("PDF editing integration", () => {
     await user.click(button("清空工作区"));
     expect(screen.queryByRole("region", { name: "PDF 导出设置" })).not.toBeInTheDocument();
     expect(button("导出 PDF")).toBeDisabled();
+  });
+
+  it("exports Ctrl and Shift selections through the real editor without changing selection from filename shortcuts", async () => {
+    const { user } = await setup();
+    fireEvent.click(page(3), { ctrlKey: true });
+    expect(selectedNumbers()).toEqual([1, 3]);
+    await user.click(button("导出选中页面"));
+    const panel = screen.getByRole("region", { name: "选中页面导出设置" });
+    expect(within(panel).getByText("2 页")).toBeVisible();
+    const filename = within(panel).getByRole("textbox", { name: "导出文件名" });
+    expect(filename).toHaveValue("first_selected.pdf");
+    await user.keyboard("{Control>}a{/Control}");
+    expect(selectedNumbers()).toEqual([1, 3]);
+    const start = vi.spyOn(PdfExportController.prototype, "start").mockResolvedValue();
+    await user.click(within(panel).getByRole("button", { name: "生成 PDF" }));
+    expect(start).toHaveBeenCalledExactlyOnceWith(expect.any(String), "first_selected.pdf", "selection");
+    await user.click(button("关闭导出设置"));
+    await user.click(page(1));
+    fireEvent.click(page(3), { shiftKey: true });
+    await user.click(button("导出选中页面"));
+    expect(within(screen.getByRole("region", { name: "选中页面导出设置" })).getByText("3 页")).toBeVisible();
+    await user.click(button("关闭导出设置"));
+    fireEvent.keyDown(screen.getByLabelText("页面缩略图滚动区域"), { key: "Escape" });
+    expect(button("导出选中页面")).toBeDisabled();
+    expect(button("撤销")).toBeDisabled();
+    start.mockRestore();
+  });
+
+  it("preserves merge choices across viewed files and resets split settings when switching sources", async () => {
+    const { user } = await setup(["first.pdf", "second.pdf", "third.pdf"]);
+    await user.click(button("合并"));
+    await user.click(screen.getByRole("checkbox", { name: "合并 third.pdf（文件 3）" }));
+    expect(screen.getByText("输出计划 · 1 份 / 6 页")).toBeVisible();
+    await user.click(button("查看 second.pdf（文件 2）"));
+    expect(screen.getByRole("checkbox", { name: "合并 third.pdf（文件 3）" })).not.toBeChecked();
+    expect(screen.getByText("输出计划 · 1 份 / 6 页")).toBeVisible();
+    await user.click(button("拆分"));
+    expect(screen.queryByRole("region", { name: "PDF 合并设置" })).not.toBeInTheDocument();
+    const ranges = screen.getByRole("textbox", { name: "拆分页码范围" });
+    fireEvent.change(ranges, { target: { value: "1,3" } });
+    expect(screen.getByText("输出计划 · 2 份 / 2 页")).toBeVisible();
+    await user.click(button("查看 first.pdf（文件 1）"));
+    expect(screen.getByRole("textbox", { name: "拆分页码范围" })).toHaveValue("1-3");
+    expect(screen.getByText("输出计划 · 1 份 / 3 页")).toBeVisible();
+    await user.click(button("关闭 PDF 处理设置"));
+    expect(screen.queryByRole("region", { name: "PDF 拆分设置" })).not.toBeInTheDocument();
   });
 
   it("warns on refresh only while edits differ from the source and removes listeners on cleanup", async () => {

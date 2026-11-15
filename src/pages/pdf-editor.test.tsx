@@ -5,6 +5,8 @@ import type { PdfFileEntry, PdfPageInfo } from "../pdf/types";
 import { createEditState } from "../pdf/edit";
 import { PdfEditor } from "./pdf-editor";
 
+const outputIdle = vi.hoisted(() => ({ busy: false, stage: "idle", documentId: null, sourceName: "", fileName: "", pageCount: 0, error: null, results: [], outputIndex: 0, totalOutputs: 0 }));
+
 const model = vi.hoisted(() => ({
   state: {
     files: [] as PdfFileEntry[],
@@ -12,6 +14,8 @@ const model = vi.hoisted(() => ({
     notice: null as string | null,
   },
   workspace: {
+    exporter: { subscribe: () => () => {}, getSnapshot: () => outputIdle, cancel: vi.fn() },
+    operations: { subscribe: () => () => {}, getSnapshot: () => outputIdle, cancel: vi.fn() },
     addFiles: vi.fn(),
     selectFile: vi.fn(),
     selectPage: vi.fn(),
@@ -181,11 +185,10 @@ describe("PDF workspace user interface", () => {
     const user = userEvent.setup();
     model.state = { files: [documentEntry("one", 1)], selectedId: "one", notice: null };
     render(<PdfEditor />);
-    for (const name of ["拆分", "合并"]) {
-      expect(screen.getByRole("button", { name })).toBeDisabled();
-    }
+    expect(screen.getByRole("button", { name: "合并" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "拆分" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "导出 PDF" })).toBeEnabled();
-    expect(screen.getByText(/拆分与多文件合并将在后续阶段开放/)).toBeInTheDocument();
+    expect(screen.getByText(/合并至少需要两份已就绪文档/)).toBeInTheDocument();
     const fileButton = screen.getByRole("button", { name: "查看 synthetic.pdf（文件 1）" });
     fileButton.focus();
     expect(fileButton).toHaveFocus();

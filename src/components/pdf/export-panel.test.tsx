@@ -45,6 +45,31 @@ function renderPanel(task: ReturnType<typeof setupController>, file = documentEn
 }
 
 describe("PDF export panel", () => {
+  it("exports the current selection only when requested and keeps the all-pages default intact", async () => {
+    const task = setupController(), file = documentEntry();
+    file.edit = { ...file.edit!, present: { ...file.edit!.present, selectedIds: [file.edit!.present.pages[2].id, file.edit!.present.pages[0].id] } };
+    render(<PdfExportPanel file={file} scope="selection" controller={task.controller} onClose={vi.fn()} />);
+    expect(screen.getByRole("region", { name: "选中页面导出设置" })).toBeVisible();
+    expect(screen.getByText("2 页")).toBeVisible();
+    expect(screen.getByText(/按当前编辑器顺序排列并保留旋转/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "生成 PDF" }));
+    expect(task.start).toHaveBeenCalledExactlyOnceWith("first", "sample_selected.pdf", "selection");
+    expect(task.capture).toHaveBeenCalledExactlyOnceWith("first", "selection");
+    await task.complete();
+  });
+
+  it("blocks an empty page selection and shared output activity", () => {
+    const task = setupController(), file = documentEntry();
+    file.edit = { ...file.edit!, present: { ...file.edit!.present, selectedIds: [] } };
+    const view = render(<PdfExportPanel file={file} scope="selection" controller={task.controller} onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "生成 PDF" })).toBeDisabled();
+    expect(screen.getByText(/请先选择至少一页/)).toBeVisible();
+    view.rerender(<PdfExportPanel file={documentEntry()} scope="selection" externalBusy controller={task.controller} onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "生成 PDF" })).toBeDisabled();
+    fireEvent.submit(screen.getByRole("button", { name: "生成 PDF" }).closest("form")!);
+    expect(task.start).not.toHaveBeenCalled();
+  });
+
   it("explains scope and compatibility, focuses the filename and submits a sanitized PDF filename", async () => {
     const user = userEvent.setup();
     const task = setupController();

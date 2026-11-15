@@ -1,3 +1,4 @@
+import { loadPdfLibrary } from "./pdf-library";
 import { normalizeRotation, type PdfEditPage } from "./edit";
 import { copyEditedPages } from "./export-copy";
 import { isCancellation, MAX_PDF_FILE_BYTES, MAX_PDF_PAGES, PdfUserError, type PdfPageInfo } from "./types";
@@ -63,7 +64,7 @@ export async function generateEditedPdf(sourceBytes: Uint8Array, request: PdfExp
       throw new PdfUserError("原始 PDF 数据不可用或超出容量限制，无法导出。");
     }
     validatePdfHeader(sourceBytes.subarray(0, 1024));
-    const library = await import("pdf-lib");
+    const library = await loadPdfLibrary();
     const { PDFDocument, degrees } = library;
     signal.throwIfAborted();
     const source = await PDFDocument.load(sourceBytes, { ignoreEncryption: false, updateMetadata: false, throwOnInvalidObject: true });

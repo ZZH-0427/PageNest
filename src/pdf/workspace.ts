@@ -6,6 +6,9 @@ import { validateEditedPdf } from "./export-validation";
 import { PdfExportDiagnosticError, type PdfExportDiagnostic, type PdfRendererProbeStatus } from "./export-diagnostics";
 import type { PdfPageIntegrityEvidence } from "./export-integrity";
 import { readPdfBytes } from "./validation";
+import { PdfOperationController, type PdfOperationSource } from "./operation-controller";
+import { buildSelectionPlan, validateOutputPlan, type PdfOutputPlan } from "./output-plan";
+import { generatePlannedPdf, validatePlannedPdf } from "./output-engine";
 import {
   clearEditSelection, createEditState, deleteEditSelection, moveEditPage, redoEdit,
   rotateEditSelection, selectAllEditPages, selectEditPage, undoEdit,
@@ -14,7 +17,7 @@ import {
 import {
   abortError, isCancellation, pdfErrorMessage, PdfUserError, MAX_PDF_FILES,
   MAX_PDF_FILE_BYTES, MAX_WORKSPACE_BYTES, MAX_RENDER_TASKS,
-  type PdfDocumentHandle, type PdfEngine, type PdfFileEntry,
+  type PdfDocumentHandle, type PdfEngine, type PdfFileEntry, type PdfPageInfo,
 } from "./types";
 
 export interface PdfWorkspaceState {
@@ -92,7 +95,8 @@ export class PdfWorkspace {
   private engine: PdfEngine | null = null;
   private ordinal = 0;
   private active = true;
-  readonly exporter = new PdfExportController((id) => this.captureExportSource(id));
+  readonly exporter = new PdfExportController((id, scope) => this.captureExportSource(id, scope));
+  readonly operations = new PdfOperationController((plan) => this.captureOperationSources(plan));
 
   constructor(private readonly engineFactory: () => PdfEngine = () => new BrowserPdfEngine()) {}
 
@@ -253,18 +257,27 @@ export class PdfWorkspace {
   }
 
   /** Only this capability can reread the retained File; no public byte getter survives removal. */
-  private captureExportSource(id: string): PdfExportSource {
+  private captureExportSource(id: string, scope?: "selection"): PdfExportSource {
+    if (this.operations.getSnapshot().busy) throw new PdfUserError("另一项 PDF 处理仍在进行，请等待其结束。");
     const entry = this.state.files.find((file) => file.id === id);
     const resource = this.resources.get(id);
     const engine = this.engine;
     if (!this.active || entry?.status !== "ready" || !entry.edit?.present.pages.length || !resource?.source || !resource.document || !engine) {
       throw new PdfUserError("当前 PDF 不可导出，请先导入并等待解析完成。");
     }
+    const exportedPages = scope === "selection" ? buildSelectionPlan(entry, "selection.pdf").outputs[0].pages : entry.edit.present.pages;
+    if (!exportedPages.length) throw new PdfUserError("请先选择至少一页，再导出选中页面。");
+    this.operations.cancel();
     const request = {
       documentId: id,
-      pages: entry.edit.present.pages.map((page) => ({ ...page })),
+      pages: exportedPages.map((page) => ({ ...page })),
       originalPages: entry.pages.map((page) => ({ ...page })),
     };
+    request.pages.forEach(Object.freeze);
+    request.originalPages.forEach(Object.freeze);
+    Object.freeze(request.pages);
+    Object.freeze(request.originalPages);
+    Object.freeze(request);
     const assertCurrent = (signal: AbortSignal) => {
       signal.throwIfAborted();
       if (!this.active || this.resources.get(id) !== resource || !resource.source || !resource.document) throw abortError();
@@ -334,6 +347,95 @@ export class PdfWorkspace {
     };
   }
 
+  /** A frozen plan holds only metadata; private File capabilities are captured here. */
+  private captureOperationSources(plan: PdfOutputPlan): PdfOperationSource {
+    validateOutputPlan(plan);
+    if (this.exporter.getSnapshot().busy) throw new PdfUserError("另一项 PDF 导出仍在进行，请等待其结束。");
+    const engine = this.engine;
+    if (!this.active || !engine) throw new PdfUserError("请先导入 PDF 并等待解析完成。");
+    const bindings = new Map<string, { resource: Resource; file: File }>();
+    for (const source of plan.sources) {
+      const entry = this.state.files.find((file) => file.id === source.documentId);
+      const resource = this.resources.get(source.documentId);
+      if (entry?.status !== "ready" || !entry.edit || !resource?.source || !resource.document || entry.size !== source.size ||
+        entry.pages.length !== source.originalPages.length || entry.pages.some((page, index) => {
+          const metadata = source.originalPages[index];
+          return page.number !== metadata.number || page.width !== metadata.width || page.height !== metadata.height ||
+            page.rotation !== metadata.rotation || page.orientation !== metadata.orientation;
+        })) throw new PdfUserError("来源 PDF 已失效或与输出计划不一致，请重新建立计划。");
+      const available = new Map(entry.edit.present.pages.map((page) => [page.id, page]));
+      for (const page of plan.outputs.flatMap((output) => output.pages).filter((page) => page.sourceDocumentId === source.documentId)) {
+        const current = available.get(page.id);
+        if (!current || current.sourcePageNumber !== page.sourcePageNumber || current.originalRotation !== page.originalRotation ||
+          current.rotationDelta !== page.rotationDelta) throw new PdfUserError("页面已在计划确认后发生变化，请重新建立输出计划。");
+      }
+      bindings.set(source.documentId, { resource, file: resource.source });
+    }
+    this.exporter.cancel();
+    const sourceSignal = AbortSignal.any([...bindings.values()].map(({ resource }) => resource.controller.signal));
+    const assertCurrent = (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      sourceSignal.throwIfAborted();
+      if (!this.active || [...bindings].some(([id, { resource, file }]) => this.resources.get(id) !== resource || resource.source !== file)) throw abortError();
+    };
+    return {
+      signal: sourceSignal,
+      generate: async (output, signal, onStage) => {
+        assertCurrent(signal);
+        const ids = new Set(output.pages.map((page) => page.sourceDocumentId));
+        const inputs: { documentId: string; bytes: Uint8Array; originalPages: readonly PdfPageInfo[] }[] = [];
+        let bytes: Uint8Array | undefined;
+        let accepted = false;
+        const handles = new Map<string, PdfDocumentHandle>();
+        let resultHandle: PdfDocumentHandle | undefined;
+        try {
+          try {
+            for (const source of plan.sources.filter((source) => ids.has(source.documentId))) {
+              assertCurrent(signal);
+              const input = await readPdfBytes(bindings.get(source.documentId)!.file, signal);
+              inputs.push({ documentId: source.documentId, bytes: input, originalPages: source.originalPages });
+            }
+            assertCurrent(signal);
+            onStage("generating");
+            bytes = await generatePlannedPdf([...inputs], output, signal);
+          } finally {
+            for (const input of inputs) input.bytes.fill(0);
+            inputs.length = 0;
+          }
+          assertCurrent(signal);
+          if (!bytes.byteLength || bytes.byteLength > MAX_PDF_FILE_BYTES) throw new PdfUserError("生成结果为空或超过 100 MiB，未提供下载。");
+          onStage("validating");
+          let validationFailed = false;
+          let validationFailure: unknown;
+          let cleanupFailure: PdfExportDiagnosticError | undefined;
+          try {
+            for (const id of ids) {
+              handles.set(id, await openValidationDocument(engine, bindings.get(id)!.file, signal, "source-open"));
+              assertCurrent(signal);
+            }
+            resultHandle = await openValidationDocument(engine,
+              new File([bytes as Uint8Array<ArrayBuffer>], "validation.pdf", { type: "application/pdf" }), signal, "output-open");
+            assertCurrent(signal);
+            const checkedOutput = resultHandle;
+            await this.renders.run(() => validatePlannedPdf(handles, checkedOutput, output.pages, signal), signal);
+          } catch (error) {
+            validationFailed = true;
+            validationFailure = error;
+          } finally {
+            const released = await Promise.all([...handles.values(), ...(resultHandle ? [resultHandle] : [])].map(releaseValidationHandle));
+            // A validation error remains primary; successful validation also requires successful cleanup.
+            cleanupFailure = released.find((error) => error !== undefined);
+          }
+          assertCurrent(signal);
+          if (validationFailed) throw validationFailure;
+          if (cleanupFailure) throw cleanupFailure;
+          accepted = true;
+          return bytes;
+        } finally { if (!accepted) bytes?.fill(0); }
+      },
+    };
+  }
+
   async renderPage(id: string, number: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta = 0) {
     const resource = this.resources.get(id);
     if (!resource?.document) throw abortError();
@@ -355,6 +457,7 @@ export class PdfWorkspace {
 
   clear() {
     this.exporter.cancel();
+    this.operations.cancel();
     for (const resource of this.resources.values()) {
       resource.controller.abort();
       resource.source = undefined;

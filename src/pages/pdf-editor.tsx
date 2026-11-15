@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type KeyboardEvent } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -9,7 +9,6 @@ import {
   Files,
   LayoutGrid,
   LoaderCircle,
-  LockKeyhole,
   Plus,
   Download,
   Redo2,
@@ -25,6 +24,7 @@ import {
 import { Button } from "../components/ui/button";
 import { PdfThumbnail } from "../components/pdf/thumbnail";
 import { PdfExportPanel } from "../components/pdf/export-panel";
+import { PdfOperationPanel } from "../components/pdf/operation-panel";
 import { usePdfWorkspace } from "../pdf/use-pdf-workspace";
 import { getEditedPageInfo, isEdited } from "../pdf/edit";
 import {
@@ -44,11 +44,6 @@ const statusLabels = {
   error: "导入失败",
 } as const;
 
-const futureActions = [
-  { name: "拆分", icon: Scissors },
-  { name: "合并", icon: Files },
-];
-
 const numberFormat = new Intl.NumberFormat("zh-CN", {
   maximumFractionDigits: 1,
 });
@@ -59,7 +54,11 @@ export function PdfEditor() {
   const scrollRoot = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
-  const [exportOpen, setExportOpen] = useState(false);
+  const [panel, setPanel] = useState<"current" | "selection" | "merge" | "split" | null>(null);
+  const exportTask = useSyncExternalStore(workspace.exporter.subscribe, workspace.exporter.getSnapshot);
+  const operationTask = useSyncExternalStore(workspace.operations.subscribe, workspace.operations.getSnapshot);
+  const outputBusy = exportTask.busy || operationTask.busy;
+  const exportOpen = panel === "current";
   const pageDrag = useRef<{ documentId: string; pageId: string } | null>(null);
   const [dragPageId, setDragPageId] = useState<string | null>(null);
   const [dropMarker, setDropMarker] = useState<{ pageId: string; after: boolean } | null>(null);
@@ -152,9 +151,9 @@ export function PdfEditor() {
         <div className="pdf-header-actions">
           <Button
             variant="outline"
-            disabled={selected?.status !== "ready" || pages.length === 0}
+            disabled={selected?.status !== "ready" || pages.length === 0 || outputBusy}
             aria-expanded={exportOpen && selected?.status === "ready"}
-            onClick={() => setExportOpen(true)}
+            onClick={() => setPanel("current")}
           >
             <Download size={15} />导出 PDF
           </Button>
@@ -421,8 +420,11 @@ export function PdfEditor() {
         <aside className="pdf-info-panel" aria-label="文档与页面信息" data-pdf-edit-context>
           <div className="pdf-panel-heading"><h2>检查器</h2><FileText size={16} /></div>
           <div className="pdf-info-scroll">
-            {exportOpen && selected?.status === "ready" && (
-              <PdfExportPanel key={selected.id} file={selected} controller={workspace.exporter} onClose={() => setExportOpen(false)} />
+            {(panel === "current" || panel === "selection") && selected?.status === "ready" && (
+              <PdfExportPanel key={`${selected.id}:${panel}`} file={selected} scope={panel} controller={workspace.exporter} externalBusy={operationTask.busy} onClose={() => setPanel(null)} />
+            )}
+            {(panel === "merge" && readyCount > 0 || panel === "split" && selected?.status === "ready") && (
+              <PdfOperationPanel key={panel === "merge" ? "merge" : `${state.selectedId}:${panel}`} files={state.files} selectedId={state.selectedId} mode={panel as "merge" | "split"} controller={workspace.operations} externalBusy={exportTask.busy} onClose={() => setPanel(null)} />
             )}
             <section className="pdf-info-section">
               <h3>文档信息</h3>
@@ -462,21 +464,19 @@ export function PdfEditor() {
                   <Button variant="outline" size="sm" disabled={singlePageIndex <= 0} aria-label="向前移动一页" onClick={() => workspace.moveSelectedPage(selected.id, -1)}><ArrowLeft size={14} />向前移</Button>
                   <Button variant="outline" size="sm" disabled={singlePageIndex < 0 || singlePageIndex === pages.length - 1} aria-label="向后移动一页" onClick={() => workspace.moveSelectedPage(selected.id, 1)}><ArrowRight size={14} />向后移</Button>
                   <Button variant="outline" size="sm" className="pdf-delete-action" disabled={!selectedCount} aria-label="批量删除选中页面" onClick={() => workspace.deleteSelectedPages(selected.id)}><Trash2 size={14} />删除所选</Button>
+                  <Button variant="outline" size="sm" className="pdf-selection-export-action" disabled={!selectedCount || outputBusy} aria-expanded={panel === "selection"} onClick={() => setPanel("selection")}><Download size={14} />导出选中页面</Button>
                   <p>仅支持单页拖拽排序。多选时请先单击一页；也可使用向前移、向后移。</p>
                 </div>
               )}
             </section>
 
-            <section className="pdf-info-section pdf-future-section" aria-label="后续编辑功能">
-              <h3>后续功能 <LockKeyhole size={12} /></h3>
-              <div className="pdf-future-actions">
-                {futureActions.map((action) => (
-                  <Button key={action.name} variant="outline" size="sm" disabled title="后续阶段开放" aria-describedby="pdf-editing-unavailable">
-                    <action.icon size={14} />{action.name}
-                  </Button>
-                ))}
+            <section className="pdf-info-section pdf-output-section" aria-label="PDF 输出操作">
+              <h3>合并与拆分</h3>
+              <div className="pdf-output-actions">
+                <Button variant="outline" size="sm" disabled={selected?.status !== "ready" || !pages.length || outputBusy} aria-expanded={panel === "split"} onClick={() => setPanel("split")}><Scissors size={14} />拆分</Button>
+                <Button variant="outline" size="sm" disabled={readyCount < 2 || outputBusy} aria-expanded={panel === "merge"} onClick={() => setPanel("merge")}><Files size={14} />合并</Button>
               </div>
-              <p id="pdf-editing-unavailable">拆分与多文件合并将在后续阶段开放。当前可导出单个文档的全部保留页面。</p>
+              <p>按当前编辑后的页面顺序处理。合并至少需要两份已就绪文档；拆分会先预览输出计划。</p>
             </section>
           </div>
         </aside>

@@ -56,7 +56,7 @@ export class PdfExportController {
   private detachSource: (() => void) | null = null;
 
   constructor(
-    private readonly capture: (documentId: string) => PdfExportSource,
+    private readonly capture: (documentId: string, scope?: "selection") => PdfExportSource,
     private readonly downloadEnvironment: PdfDownloadEnvironment = browserDownload,
   ) {}
 
@@ -79,7 +79,7 @@ export class PdfExportController {
     this.url = null;
   }
 
-  async start(documentId: string, filename: string) {
+  async start(documentId: string, filename: string, scope?: "selection") {
     // An aborted non-interruptible save must finish before another job may allocate memory.
     if (this.running) return;
     this.releaseResult();
@@ -90,7 +90,7 @@ export class PdfExportController {
     this.publish({ ...emptyState(), stage: "preparing", busy: true, documentId, fileName: sanitizePdfFilename(filename) });
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      const source = this.capture(documentId);
+      const source = scope ? this.capture(documentId, scope) : this.capture(documentId);
       source.signal.throwIfAborted();
       const cancel = () => this.cancel();
       source.signal.addEventListener("abort", cancel, { once: true });

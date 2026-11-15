@@ -13,6 +13,8 @@ interface Props {
   file: PdfFileEntry;
   controller: PdfExportController;
   onClose: () => void;
+  scope?: "current" | "selection";
+  externalBusy?: boolean;
 }
 
 const stageLabels = {
@@ -27,18 +29,20 @@ const stageLabels = {
 } as const;
 
 /** Only lightweight task metadata enters this component; bytes and URLs stay in the controller. */
-export function PdfExportPanel({ file, controller, onClose }: Props) {
+export function PdfExportPanel({ file, controller, onClose, scope = "current", externalBusy = false }: Props) {
   const task = useSyncExternalStore(controller.subscribe, controller.getSnapshot);
-  const [filename, setFilename] = useState(() => defaultExportFilename(file.name));
+  const [filename, setFilename] = useState(() => scope === "selection" ? defaultExportFilename(file.name).replace(/_edited\.pdf$/, "_selected.pdf") : defaultExportFilename(file.name));
   const [actionError, setActionError] = useState<string | null>(null);
   const filenameInput = useRef<HTMLInputElement>(null);
   const alive = useRef(false);
   const submitting = useRef(false);
   const belongsToFile = task.documentId === file.id;
   const stage = belongsToFile ? task.stage : task.busy ? "cancelling" : "idle";
-  const pageCount = file.edit?.present.pages.length ?? 0;
+  const retainedPages = file.edit?.present.pages ?? [];
+  const chosenPages = scope === "selection" ? retainedPages.filter((page) => file.edit?.present.selectedIds.includes(page.id)) : retainedPages;
+  const pageCount = chosenPages.length;
   const safeFilename = sanitizePdfFilename(filename);
-  const canGenerate = file.status === "ready" && pageCount > 0 && !task.busy;
+  const canGenerate = file.status === "ready" && pageCount > 0 && !task.busy && !externalBusy;
   const error = actionError ?? (belongsToFile ? task.error : null);
 
   useEffect(() => {
@@ -48,13 +52,14 @@ export function PdfExportPanel({ file, controller, onClose }: Props) {
       alive.current = false;
       controller.cancel();
     };
-  }, [controller]);
+  }, [controller, scope, file.id]);
 
   const generate = () => {
     if (!canGenerate || submitting.current || controller.getSnapshot().busy) return;
     submitting.current = true;
     setActionError(null);
-    void controller.start(file.id, safeFilename).catch(() => {
+    const pending = scope === "selection" ? controller.start(file.id, safeFilename, "selection") : controller.start(file.id, safeFilename);
+    void pending.catch(() => {
       if (alive.current) setActionError("无法完成导出，请重新生成或尝试较小的文档。");
     }).finally(() => { submitting.current = false; });
   };
@@ -69,14 +74,14 @@ export function PdfExportPanel({ file, controller, onClose }: Props) {
   };
 
   return (
-    <section className="pdf-info-section pdf-export-panel" aria-label="PDF 导出设置">
-      <h3>导出 PDF
+    <section className="pdf-info-section pdf-export-panel" aria-label={scope === "selection" ? "选中页面导出设置" : "PDF 导出设置"}>
+      <h3>{scope === "selection" ? "导出选中页面" : "导出 PDF"}
         <Button type="button" variant="ghost" size="icon" aria-label="关闭导出设置" onClick={onClose}><X size={14} /></Button>
       </h3>
       <p className="pdf-export-source" title={file.name}>{file.name}</p>
       <dl>
         <div><dt>原文件大小</dt><dd>{formatPdfBytes(file.size)}</dd></div>
-        <div><dt>当前保留页数</dt><dd>{pageCount} 页</dd></div>
+        <div><dt>{scope === "selection" ? "已选页数" : "当前保留页数"}</dt><dd>{pageCount} 页</dd></div>
         <div><dt>格式</dt><dd>PDF</dd></div>
       </dl>
       <form onSubmit={(event) => { event.preventDefault(); generate(); }}>
@@ -89,12 +94,13 @@ export function PdfExportPanel({ file, controller, onClose }: Props) {
           maxLength={240}
           autoComplete="off"
           spellCheck={false}
-          disabled={task.busy || stage === "ready"}
+          disabled={task.busy || externalBusy || stage === "ready"}
           aria-describedby="pdf-export-name-note"
           onChange={(event) => setFilename(event.target.value)}
         />
         <p className="pdf-export-name-note" id="pdf-export-name-note">下载名称：<span>{safeFilename}</span></p>
-        <p className="pdf-export-note">导出当前文档的全部保留页面，不按页面选区裁剪。工作区修改仍在本次会话内；生成文件采用点击生成时的编辑结果，后续修改需重新生成。</p>
+        <p className="pdf-export-note">{scope === "selection" ? "仅导出当前选中页面，按当前编辑器顺序排列并保留旋转，不按点击顺序排列。" : "导出当前文档的全部保留页面，不按页面选区裁剪。"}工作区修改仍在本次会话内；生成文件采用点击生成时的编辑结果，后续修改需重新生成。</p>
+        {scope === "selection" && pageCount === 0 && <p className="pdf-export-note">请先选择至少一页。Ctrl / ⌘ 多选，Shift 连续选择。</p>}
         <div className="pdf-export-compatibility">
           <strong>兼容性说明</strong>
           <p>{PDF_EXPORT_COMPATIBILITY_NOTICE}</p>
@@ -103,6 +109,7 @@ export function PdfExportPanel({ file, controller, onClose }: Props) {
         <div className="pdf-export-status" role="status" aria-live="polite" aria-atomic="true">
           {task.busy ? <LoaderCircle size={15} className="pdf-spinner" /> : stage === "ready" || stage === "downloaded" ? <Check size={15} /> : null}
           <strong>{error ? "导出失败" : stageLabels[stage]}</strong>
+          {externalBusy && <p>另一项 PDF 输出任务正在运行，结束后可开始。</p>}
           {belongsToFile && task.stage !== "idle" && <span>本次生成 {task.pageCount} 页 · {task.fileName}</span>}
           {stage === "ready" && <p>验证已完成。点击下载，由浏览器处理保存。</p>}
           {stage === "downloaded" && <p>已生成 PDF 并触发下载。请检查浏览器下载列表；无法确认文件已保存到磁盘。</p>}
