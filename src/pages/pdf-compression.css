@@ -1,0 +1,85 @@
+.page.compression-page { max-width: 1780px; padding: 22px 32px 30px; }
+.compression-header { display: flex; align-items: center; justify-content: space-between; gap: 22px; margin: 8px 0 26px; }
+.compression-title { display: flex; align-items: center; flex-wrap: wrap; gap: 13px; margin-top: 15px; }
+.compression-title h1 { font-size: 30px; line-height: 1.4; letter-spacing: -.8px; font-weight: 600; }
+.compression-title > span { padding: 5px 8px; border-radius: 5px; background: var(--blue-soft); color: var(--primary); font-size: 10px; }
+.compression-header p { color: var(--muted); font-size: 12px; line-height: 1.9; margin-top: 9px; }
+.compression-header-actions { display: flex; flex-shrink: 0; gap: 10px; }
+.compression-header-actions .button { font-size: 12px; min-height: 38px; padding: 10px 15px; }
+.compression-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 22px; }
+.compression-main, .compression-settings { min-width: 0; }
+.compression-import { display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 12px 16px; padding: 24px; background: var(--surface); border: 1px dashed var(--border); border-radius: 13px; box-shadow: var(--shadow); }
+.compression-import.is-dragging { border-color: var(--primary); background: var(--blue-soft); }
+.compression-upload-symbol { display: grid; place-items: center; width: 48px; height: 48px; color: var(--primary); background: var(--blue-soft); border: 1px solid color-mix(in srgb, var(--primary) 14%, transparent); border-radius: 12px; }
+.compression-import h2 { font-size: 14px; line-height: 1.6; font-weight: 550; }
+.compression-import div > p { color: var(--muted); font-size: 11px; line-height: 1.8; margin-top: 4px; }
+.compression-import > .button { font-size: 11px; padding: 10px 13px; }
+.compression-input-limits { grid-column: 2 / -1; color: var(--faint); font-size: 10px; line-height: 1.8; }
+.compression-files { margin-top: 24px; }
+.compression-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 13px; }
+.compression-section-heading h2 { font-size: 14px; line-height: 1.7; font-weight: 550; display: flex; align-items: center; gap: 8px; }
+.compression-section-heading h2 > span { font-size: 10px; font-weight: 450; padding: 2px 6px; background: var(--surface-subtle); color: var(--muted); border-radius: 4px; }
+.compression-section-heading > span { color: var(--faint); font-size: 10px; white-space: nowrap; }
+.compression-empty { background: var(--surface); border: 1px solid var(--border); border-radius: 13px; padding: 62px 24px; text-align: center; color: var(--faint); }
+.compression-empty > svg { margin: 0 auto 18px; color: var(--muted); }
+.compression-empty h3 { font-size: 16px; line-height: 1.7; font-weight: 500; color: var(--text); }
+.compression-empty p { margin-top: 9px; font-size: 11px; line-height: 2; }
+.compression-file-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.compression-file-card { min-width: 0; padding: 19px 20px 17px; background: var(--surface); border: 1px solid var(--border); border-radius: 13px; box-shadow: var(--shadow); }
+.compression-file-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.compression-file-heading > svg { color: var(--muted); }
+.compression-file-heading > div { flex: 1; min-width: 0; }
+.compression-file-heading h3 { font-size: 12px; line-height: 1.7; font-weight: 550; overflow-wrap: anywhere; }
+.compression-file-heading p { font-size: 10px; line-height: 1.7; color: var(--faint); margin-top: 2px; }
+.compression-file-heading .button-icon { width: 27px; min-height: 27px; padding: 5px; }
+.compression-status { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; white-space: nowrap; color: var(--muted); }
+.compression-file-card[data-status="ready"] .compression-status, .compression-statistics .has-savings { color: var(--primary); }
+.compression-statistics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 18px 0 0; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.compression-statistics dt { font-size: 10px; line-height: 1.7; color: var(--faint); }
+.compression-statistics dd { margin: 4px 0 0; font-size: 16px; line-height: 1.5; letter-spacing: -.3px; font-weight: 500; overflow-wrap: anywhere; }
+.compression-no-benefit { font-size: 11px; line-height: 1.9; color: var(--muted); background: var(--surface-subtle); border-radius: 6px; margin-top: 13px; padding: 9px 11px; }
+.compression-file-error { display: flex; align-items: flex-start; gap: 7px; margin-top: 13px; font-size: 11px; line-height: 1.9; color: var(--text); overflow-wrap: anywhere; }
+.compression-file-error svg { margin-top: 3px; color: var(--muted); }
+.compression-result-details { font-size: 10px; line-height: 1.9; color: var(--muted); margin-top: 11px; overflow-wrap: anywhere; }
+.compression-result-details p:first-child { display: flex; align-items: flex-start; gap: 6px; }
+.compression-result-details p:first-child svg { margin-top: 3px; color: var(--primary); }
+.compression-result-details ul { padding-left: 19px; margin: 4px 0 0; }
+.compression-row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; margin-top: 13px; }
+.compression-row-actions:empty { display: none; }
+.compression-row-actions .button { font-size: 11px; min-height: 32px; padding: 8px 12px; }
+.compression-settings { padding: 19px 18px 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 13px; box-shadow: var(--shadow); }
+.compression-settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 18px; }
+.compression-settings-heading h2 { font-size: 14px; line-height: 1.7; font-weight: 550; }
+.compression-settings-heading > svg { color: var(--faint); }
+.compression-settings fieldset { border: 0; margin: 0; padding: 0; }
+.compression-settings legend { color: var(--muted); font-size: 10px; margin-bottom: 10px; }
+.compression-mode { display: flex; align-items: flex-start; gap: 9px; padding: 11px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; margin-top: 8px; }
+.compression-mode.is-selected { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); background: var(--blue-soft); }
+.compression-mode > input { accent-color: var(--primary); width: 13px; height: 13px; flex-shrink: 0; margin: 4px 0 0; }
+.compression-mode > span { display: block; min-width: 0; }
+.compression-mode strong { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 11px; line-height: 1.8; font-weight: 550; }
+.compression-mode small { font-size: 9px; font-weight: 400; color: var(--muted); }
+.compression-mode span > span { display: block; margin-top: 3px; font-size: 10px; line-height: 1.7; color: var(--muted); }
+.compression-mode em { display: block; font-size: 10px; font-style: normal; color: var(--faint); margin-top: 4px; }
+.compression-mode:has(input:disabled) { cursor: default; opacity: .6; }
+.compression-mode-detail { color: var(--muted); font-size: 10px; line-height: 1.9; margin-top: 12px; }
+.compression-support-error { color: var(--text); font-size: 10px; line-height: 1.9; margin-top: 10px; }
+.compression-task-status { display: flex; gap: 7px; align-items: flex-start; margin-top: 18px; color: var(--muted); font-size: 10px; line-height: 1.8; }
+.compression-task-status svg { margin-top: 2px; color: var(--primary); }
+.compression-start, .compression-stop { width: 100%; margin-top: 11px; font-size: 12px; }
+.compression-small-note { margin-top: 9px; color: var(--faint); font-size: 10px; line-height: 1.8; }
+.compression-compatibility { border-top: 1px solid var(--border); margin-top: 20px; padding-top: 15px; }
+.compression-compatibility h3 { font-size: 11px; font-weight: 550; line-height: 1.8; }
+.compression-compatibility p { color: var(--faint); font-size: 10px; line-height: 1.9; margin-top: 8px; }
+.compression-privacy { display: flex; align-items: flex-start; gap: 8px; margin-top: 20px; color: var(--faint); font-size: 10px; line-height: 1.9; }
+.compression-privacy > svg { margin-top: 2px; color: var(--muted); }
+.compression-notice { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); padding: 11px 13px; margin-bottom: 16px; }
+.compression-notice > svg { color: var(--muted); }
+.compression-notice p { flex: 1; font-size: 11px; line-height: 1.9; overflow-wrap: anywhere; }
+.compression-spinner { animation: compression-spin 1.1s linear infinite; }
+@keyframes compression-spin { to { transform: rotate(360deg); } }
+@media (min-width: 1800px) { .page.compression-page { padding: 24px 40px 32px; } .compression-grid { grid-template-columns: minmax(0, 1fr) 330px; gap: 26px; } .compression-header { margin-bottom: 30px; } .compression-import { padding: 28px; } }
+@media (min-width: 2400px) { .page.compression-page { max-width: 1900px; padding-top: 30px; } .compression-grid { grid-template-columns: minmax(0, 1fr) 350px; gap: 30px; } }
+@media (max-width: 1200px) { .page.compression-page { padding: 18px 24px 26px; } .compression-grid { grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; } .compression-header { align-items: flex-start; } .compression-header-actions { flex-wrap: wrap; justify-content: flex-end; } .compression-import { grid-template-columns: 42px minmax(0, 1fr); padding: 19px; gap: 10px; } .compression-import > .button { grid-column: 2; justify-self: start; } .compression-input-limits { grid-column: 1 / -1; } .compression-statistics { gap: 10px; } .compression-statistics dd { font-size: 14px; } }
+@media (max-width: 980px) { .compression-grid { grid-template-columns: minmax(0, 1fr); } .compression-header { flex-direction: column; gap: 15px; } .compression-header-actions { justify-content: flex-start; } .compression-settings { max-width: none; } .compression-settings fieldset { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } .compression-mode { margin-top: 0; } .compression-settings legend { grid-column: 1 / -1; } }
+@media (max-width: 600px) { .page.compression-page { padding-left: 18px; padding-right: 18px; } .compression-statistics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .compression-file-heading { flex-wrap: wrap; } .compression-file-heading > div { flex-basis: calc(100% - 45px); } .compression-file-heading .compression-status { margin-left: 32px; } .compression-file-heading .button-icon { margin-left: auto; } .compression-settings fieldset { grid-template-columns: minmax(0, 1fr); } .compression-section-heading { flex-wrap: wrap; } }

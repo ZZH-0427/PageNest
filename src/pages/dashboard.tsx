@@ -110,7 +110,7 @@ export function Dashboard() {
               <p>{tool.description}</p>
               <div className="tool-card-bottom">
                 <span>{tool.english}</span>
-                <span className="soon-badge">{tool.id === "pdf-editor" ? "本地预览" : "即将推出"}</span>
+                <span className="soon-badge">{tool.id === "pdf-editor" ? "本地预览" : tool.id === "compression" ? "本地压缩" : "即将推出"}</span>
               </div>
             </Link>
           ))}

@@ -58,6 +58,75 @@ function syntheticDocument(width = 612, height = 792, originalRotation = 0) {
   return { page, document, task };
 }
 
+function documentEvidenceFixture() {
+  const fixture = syntheticDocument();
+  const info: Record<string, unknown> = { Title: "SYNTHETIC TITLE", Author: "SYNTHETIC AUTHOR", PDFFormatVersion: "1.4", IsLinearized: false };
+  const metadata = vi.fn(async () => ({ info, metadata: { getRaw: () => "<synthetic-metadata />" } }));
+  const outline = vi.fn(async () => [{ title: "SYNTHETIC BOOKMARK", bold: false, italic: false,
+    color: new Uint8ClampedArray([0, 0, 0]), dest: [{ num: 12, gen: 0 }, { name: "Fit" }], items: [] }]);
+  const document = { ...fixture.document, getMetadata: metadata, getOutline: outline,
+    getPageIndex: vi.fn(async () => 0), getDestination: vi.fn(async () => null),
+    getAttachments: vi.fn(async (): Promise<null | Record<string, unknown>> => null),
+    getJSActions: vi.fn(async (): Promise<null | Record<string, unknown>> => null),
+    getPermissions: vi.fn(async (): Promise<null | number[]> => null) };
+  fixture.task.promise = Promise.resolve(document);
+  return { ...fixture, evidence: document, info, outline };
+}
+
+describe("compression document inspection remains separate from ordinary previews", () => {
+  it("retains exact default 128 rendering and supports a bounded explicit 512 render", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    const fixture = syntheticDocument();
+    adapter.getDocument.mockReturnValue(fixture.task);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ getImageData: () => ({ data: new Uint8ClampedArray([1, 2, 3, 255]) }) } as unknown as CanvasRenderingContext2D);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    await handle.inspectPage!(1, signal());
+    await handle.inspectPage!(1, signal(), 0, false, 512);
+    expect(fixture.page.render.mock.calls.map(([call]) => Math.max(call.viewport.width, call.viewport.height))).toEqual([128, 512]);
+    await expect(handle.inspectPage!(1, signal(), 0, false, 4096 as 512)).rejects.toMatchObject({ code: "INSPECTION_FAILURE" });
+    expect(fixture.page.render).toHaveBeenCalledTimes(2);
+  });
+
+  it("compares metadata and semantic bookmark destinations without exposing authored values", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    const fixture = documentEvidenceFixture();
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const first = await handle.inspectDocument!(signal());
+    fixture.info.PDFFormatVersion = "1.7";
+    fixture.info.IsLinearized = true;
+    fixture.outline.mockResolvedValue([{ title: "SYNTHETIC BOOKMARK", bold: false, italic: false, color: new Uint8ClampedArray([0, 0, 0]),
+      dest: [{ num: 77, gen: 0 }, { name: "Fit" }], items: [] }]);
+    const rewritten = await handle.inspectDocument!(signal());
+    expect(rewritten).toEqual(first);
+    fixture.info.Author = "CHANGED SYNTHETIC AUTHOR";
+    expect((await handle.inspectDocument!(signal())).metadataDigest).not.toBe(first.metadataDigest);
+    fixture.evidence.getPageIndex.mockResolvedValue(1);
+    expect((await handle.inspectDocument!(signal())).outlinesDigest).not.toBe(first.outlinesDigest);
+    expect(JSON.stringify(first)).not.toContain("SYNTHETIC");
+    expect(first).toMatchObject({ hasForms: false, hasSignatures: false, hasAttachments: false, hasJavaScript: false, encrypted: false });
+  });
+
+  it("reports unsupported document capabilities as booleans and hides raw parser failures", async () => {
+    vi.stubGlobal("crypto", webcrypto);
+    const fixture = documentEvidenceFixture();
+    fixture.info.IsSignaturesPresent = true;
+    fixture.info.IsAcroFormPresent = true;
+    fixture.evidence.getAttachments.mockResolvedValue({ synthetic: { content: "SYNTHETIC PRIVATE ATTACHMENT" } });
+    fixture.evidence.getJSActions.mockResolvedValue({ synthetic: "SYNTHETIC SCRIPT" });
+    fixture.evidence.getPermissions.mockResolvedValue([]);
+    adapter.getDocument.mockReturnValue(fixture.task);
+    const handle = await engine().open(file(), signal(), vi.fn());
+    const result = await handle.inspectDocument!(signal());
+    expect(result).toMatchObject({ hasForms: true, hasSignatures: true, hasAttachments: true, hasJavaScript: true, encrypted: true });
+    expect(JSON.stringify(result)).not.toMatch(/ATTACHMENT|SCRIPT/);
+    fixture.evidence.getMetadata.mockRejectedValue(new Error("SYNTHETIC PRIVATE PARSER DETAIL"));
+    const failure = await handle.inspectDocument!(signal()).catch((error) => error);
+    expect(failure).toBeInstanceOf(PdfUserError);
+    expect(String(failure)).not.toContain("SYNTHETIC PRIVATE");
+  });
+});
+
 function pendingRender() {
   const completion = deferred<void>();
   const task = {

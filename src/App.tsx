@@ -7,6 +7,7 @@ import { Settings } from "./pages/settings";
 import { tools } from "./config/tools";
 import { Button } from "./components/ui/button";
 import { PdfEditor } from "./pages/pdf-editor";
+import { PdfCompression } from "./pages/pdf-compression";
 
 export function App() {
   return (
@@ -17,7 +18,7 @@ export function App() {
           <Route
             key={tool.id}
             path={tool.id}
-            element={tool.id === "pdf-editor" ? <PdfEditor /> : <ToolPage tool={tool} />}
+            element={tool.id === "pdf-editor" ? <PdfEditor /> : tool.id === "compression" ? <PdfCompression /> : <ToolPage tool={tool} />}
           />
         ))}
         <Route path="tasks" element={<Tasks />} />

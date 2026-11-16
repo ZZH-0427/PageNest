@@ -32,12 +32,17 @@ export interface PdfFileEntry {
 export interface PdfDocumentHandle {
   pages: PdfPageInfo[];
   render(page: number, canvas: HTMLCanvasElement, signal: AbortSignal, rotationDelta?: number): Promise<void>;
-  inspectPage?(page: number, signal: AbortSignal, rotationDelta?: number, includeRenderSignature?: boolean): Promise<{
+  inspectPage?(page: number, signal: AbortSignal, rotationDelta?: number, includeRenderSignature?: boolean, renderSize?: 128 | 512): Promise<{
     textDigest: string; visualDigest: string; width: number; height: number; rotation: number;
     /** Bounded transient comparison scratch, never UI state, storage or diagnostics. Caller erases it. */
     visualSample?: { width: number; height: number; pixels: Uint8Array };
     /** Optional in-memory subset hashes; diagnostics may expose equality booleans only. */
     renderSignature?: { viewport: string; graphics: string };
+  }>;
+  /** Private compression validation evidence; document values never enter UI state. */
+  inspectDocument?(signal: AbortSignal): Promise<{
+    metadataDigest: string; outlinesDigest: string;
+    hasForms: boolean; hasSignatures?: boolean; hasAttachments: boolean; hasJavaScript: boolean; encrypted: boolean;
   }>;
   destroy(): Promise<void>;
 }

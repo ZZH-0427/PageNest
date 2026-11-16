@@ -210,7 +210,7 @@ export class BrowserPdfEngine implements PdfEngine {
       return {
         pages,
         render: renderPage,
-        inspectPage: async (number, inspectSignal, rotationDelta = 0, includeRenderSignature = false) => {
+        inspectPage: async (number, inspectSignal, rotationDelta = 0, includeRenderSignature = false, renderSize = 128) => {
           const time = deadline(AbortSignal.any([inspectSignal, disposed.signal, this.lifetime.signal]), 20_000,
             new PdfExportDiagnosticError("VALIDATION_TIMEOUT", { stage: "inspection", item: "deadline" }));
           const canvas = globalThis.document.createElement("canvas");
@@ -221,6 +221,7 @@ export class BrowserPdfEngine implements PdfEngine {
           let scratch: Uint8Array<ArrayBuffer> | undefined;
           try {
             time.signal.throwIfAborted();
+            if (renderSize !== 128 && renderSize !== 512) throw new PdfUserError("不支持的验证分辨率。");
             page = await abortable(document.getPage(number), time.signal);
             const rotation = ((page.rotate + rotationDelta) % 360 + 360) % 360;
             const viewport = page.getViewport({ scale: 1, rotation });
@@ -253,7 +254,7 @@ export class BrowserPdfEngine implements PdfEngine {
                 // Optional diagnosis never substitutes for the exact text and pixel checks.
               }
             } : undefined;
-            await renderPage(number, canvas, time.signal, rotationDelta, 128, 128, inspectRender);
+            await renderPage(number, canvas, time.signal, rotationDelta, renderSize, renderSize, inspectRender);
             time.signal.throwIfAborted();
             const context = canvas.getContext("2d");
             if (!context) throw new PdfUserError("浏览器无法验证页面内容，未提供下载。");
@@ -281,6 +282,72 @@ export class BrowserPdfEngine implements PdfEngine {
             throw new PdfExportDiagnosticError("INSPECTION_FAILURE", { stage: "cleanup", item: "resources" });
           }
           return result;
+        },
+        inspectDocument: async (inspectSignal) => {
+          const time = deadline(AbortSignal.any([inspectSignal, disposed.signal, this.lifetime.signal]), 60_000,
+            new PdfUserError("文档结构验证超时，未提供结果。"));
+          const hash = async (value: unknown) => {
+            const data = new TextEncoder().encode(JSON.stringify(value));
+            try {
+              if (data.length > 2 * 1024 ** 2) throw new PdfUserError("文档元数据超出安全检查范围。");
+              const digest = await abortable(crypto.subtle.digest("SHA-256", data), time.signal);
+              return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+            } finally { data.fill(0); }
+          };
+          try {
+            const metadata = await abortable(document.getMetadata(), time.signal);
+            const info = metadata.info as Record<string, unknown>;
+            const canonical = (value: unknown, depth = 0): unknown => {
+              if (depth > 16) throw new PdfUserError("文档元数据层级过深。");
+              if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+              if (typeof value === "number" && Number.isFinite(value)) return value;
+              if (Array.isArray(value)) return value.map((entry) => canonical(entry, depth + 1));
+              if (typeof value === "object" && value !== null) {
+                return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+                  .map(([key, entry]) => [key, canonical(entry, depth + 1)]));
+              }
+              throw new PdfUserError("无法安全验证文档元数据。");
+            };
+            // Version and linearization describe the rewritten container, not authored metadata.
+            const authoredInfo = Object.fromEntries(Object.entries(info).filter(([key]) => !["PDFFormatVersion", "IsLinearized"].includes(key)));
+            const outline = await abortable(document.getOutline(), time.signal);
+            let outlineItems = 0;
+            type Outline = NonNullable<typeof outline>[number];
+            const normalizeOutline = async (items: Outline[], depth = 0): Promise<unknown[]> => {
+              if (depth > 16 || items.length > 1000) throw new PdfUserError("书签结构超出安全检查范围。");
+              const values: unknown[] = [];
+              for (const entry of items) {
+                time.signal.throwIfAborted();
+                if (++outlineItems > 1000) throw new PdfUserError("书签数量超出安全检查范围。");
+                let destination: unknown = entry.dest ?? null;
+                if (typeof destination === "string") destination = await abortable(document.getDestination(destination), time.signal);
+                if (Array.isArray(destination) && destination.length) {
+                  const target = destination[0] as unknown;
+                  if (typeof target === "object" && target !== null && "num" in target && "gen" in target) {
+                    destination = [await abortable(document.getPageIndex(target as { num: number; gen: number }), time.signal), ...destination.slice(1)];
+                  }
+                }
+                values.push(canonical({ title: entry.title, bold: entry.bold, italic: entry.italic,
+                  color: Array.from(entry.color), count: entry.count ?? null, url: entry.url ?? null,
+                  unsafeUrl: entry.unsafeUrl ?? null, newWindow: entry.newWindow ?? null, dest: destination,
+                  children: await normalizeOutline(entry.items, depth + 1) }));
+              }
+              return values;
+            };
+            const outlines = await normalizeOutline(outline ?? []);
+            const attachments = await abortable(document.getAttachments(), time.signal);
+            const actions = await abortable(document.getJSActions(), time.signal);
+            const permissions = await abortable(document.getPermissions(), time.signal);
+            return { metadataDigest: await hash(canonical({ info: authoredInfo, xml: metadata.metadata?.getRaw() ?? null })),
+              outlinesDigest: await hash(outlines), hasForms: !!info.IsAcroFormPresent || !!info.IsXFAPresent,
+              hasSignatures: !!info.IsSignaturesPresent,
+              hasAttachments: attachments !== null && Object.keys(attachments).length > 0,
+              hasJavaScript: actions !== null && Object.keys(actions).length > 0, encrypted: permissions !== null };
+          } catch (error) {
+            if (time.signal.aborted) throw time.signal.reason;
+            if (error instanceof PdfUserError) throw error;
+            throw new PdfUserError("无法独立验证文档元数据或书签，未提供结果。");
+          } finally { time.clear(); }
         },
         destroy: () => {
           if (destruction) return destruction;

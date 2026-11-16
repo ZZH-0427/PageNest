@@ -7,6 +7,7 @@ import { pdfLibDiagnostics } from "./scripts/pdf-lib-diagnostics";
 export default defineConfig({
   base: "/PageNest/",
   plugins: [react(), tailwindcss(), pdfAssets(), pdfLibDiagnostics()],
+  worker: { format: "es" },
   test: {
     environment: "jsdom",
     globals: true,

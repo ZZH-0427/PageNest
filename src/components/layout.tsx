@@ -101,7 +101,7 @@ export function Layout() {
             >
               <item.icon size={18} strokeWidth={1.7} />
               <span>{item.name}</span>
-              {index > 0 && index < 5 && item.id !== "pdf-editor" && (
+              {index > 0 && index < 5 && item.id !== "pdf-editor" && item.id !== "compression" && (
                 <span className="nav-dot" aria-label="功能待开发" />
               )}
               {item.id === "" && <span className="nav-key">⌂</span>}
